@@ -1,7 +1,8 @@
+#include "euicc.private.h"
 #include "es10a.h"
-#include "es10x.private.h"
 
 #include "hexutil.h"
+#include "derutil.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -9,66 +10,53 @@
 #include <unistd.h>
 #include <string.h>
 
-#include "asn1c/asn1/EuiccConfiguredAddressesRequest.h"
-#include "asn1c/asn1/EuiccConfiguredAddressesResponse.h"
-#include "asn1c/asn1/SetDefaultDpAddressRequest.h"
-#include "asn1c/asn1/SetDefaultDpAddressResponse.h"
-
-struct userdata_get_euicc_configured_addresses
+int es10a_get_euicc_configured_addresses(struct euicc_ctx *ctx, struct es10a_euicc_configured_addresses *address)
 {
-    char **smds;
-    char **smdp;
-};
-
-static int iter_EuiccConfiguredAddressesResponse(struct apdu_response *response, void *userdata)
-{
-    struct userdata_get_euicc_configured_addresses *ud = (struct userdata_get_euicc_configured_addresses *)userdata;
     int fret = 0;
-    asn_dec_rval_t asn1drval;
-    EuiccConfiguredAddressesResponse_t *asn1resp = NULL;
+    struct euicc_derutil_node n_request = {
+        .tag = 0xBF3C, // EuiccConfiguredAddressesRequest
+    };
+    uint32_t reqlen;
+    uint8_t *respbuf = NULL;
+    unsigned resplen;
 
-    if (ud->smds)
-        *ud->smds = NULL;
-    if (ud->smdp)
-        *ud->smdp = NULL;
+    struct euicc_derutil_node tmpnode, n_Response;
 
-    asn1drval = ber_decode(NULL, &asn_DEF_EuiccConfiguredAddressesResponse, (void **)&asn1resp, response->data, response->length);
-    if (asn1drval.code != RC_OK)
+    memset(address, 0, sizeof(*address));
+
+    reqlen = sizeof(ctx->apdu._internal.request_buffer.body);
+    if (euicc_derutil_pack(ctx->apdu._internal.request_buffer.body, &reqlen, &n_request))
     {
         goto err;
     }
 
-    if (ud->smds)
+    if (es10x_command(ctx, &respbuf, &resplen, ctx->apdu._internal.request_buffer.body, reqlen) < 0)
     {
-        *ud->smds = malloc(asn1resp->rootDsAddress.size + 1);
-        if (!*ud->smds)
-        {
-            goto err;
-        }
-        memcpy(*ud->smds, asn1resp->rootDsAddress.buf, asn1resp->rootDsAddress.size);
-        (*ud->smds)[asn1resp->rootDsAddress.size] = '\0';
+        goto err;
     }
 
-    if (ud->smdp)
+    if (euicc_derutil_unpack_find_tag(&n_Response, n_request.tag, respbuf, resplen))
     {
-        if (asn1resp->defaultDpAddress)
+        goto err;
+    }
+
+    if (euicc_derutil_unpack_find_tag(&tmpnode, 0x80, n_Response.value, n_Response.length) == 0)
+    {
+        address->defaultDpAddress = malloc(tmpnode.length + 1);
+        if (address->defaultDpAddress)
         {
-            *ud->smdp = malloc(asn1resp->defaultDpAddress->size + 1);
-            if (!*ud->smdp)
-            {
-                goto err;
-            }
-            memcpy(*ud->smdp, asn1resp->defaultDpAddress->buf, asn1resp->defaultDpAddress->size);
-            (*ud->smdp)[asn1resp->defaultDpAddress->size] = '\0';
+            memcpy(address->defaultDpAddress, tmpnode.value, tmpnode.length);
+            address->defaultDpAddress[tmpnode.length] = '\0';
         }
-        else
+    }
+
+    if (euicc_derutil_unpack_find_tag(&tmpnode, 0x81, n_Response.value, n_Response.length) == 0)
+    {
+        address->rootDsAddress = malloc(tmpnode.length + 1);
+        if (address->rootDsAddress)
         {
-            *ud->smdp = malloc(1);
-            if (!*ud->smdp)
-            {
-                goto err;
-            }
-            (*ud->smdp)[0] = '\0';
+            memcpy(address->rootDsAddress, tmpnode.value, tmpnode.length);
+            address->rootDsAddress[tmpnode.length] = '\0';
         }
     }
 
@@ -76,142 +64,75 @@ static int iter_EuiccConfiguredAddressesResponse(struct apdu_response *response,
 
 err:
     fret = -1;
-    if (*ud->smds)
-    {
-        free(*ud->smds);
-        *ud->smds = NULL;
-    }
-    if (*ud->smdp)
-    {
-        free(*ud->smdp);
-        *ud->smdp = NULL;
-    }
+    free(address->defaultDpAddress);
+    address->defaultDpAddress = NULL;
+    free(address->rootDsAddress);
+    address->rootDsAddress = NULL;
 exit:
-    if (asn1resp)
-    {
-        ASN_STRUCT_FREE(asn_DEF_EuiccConfiguredAddressesResponse, asn1resp);
-    }
-
-    return fret;
-}
-
-int es10a_get_euicc_configured_addresses(struct euicc_ctx *ctx, char **smdp, char **smds)
-{
-    int fret = 0;
-    int ret;
-    asn_enc_rval_t asn1erval;
-    EuiccConfiguredAddressesRequest_t *asn1req = NULL;
-    struct userdata_get_euicc_configured_addresses ud;
-
-    asn1req = malloc(sizeof(EuiccConfiguredAddressesRequest_t));
-    if (!asn1req)
-    {
-        goto err;
-    }
-    memset(asn1req, 0, sizeof(*asn1req));
-
-    asn1erval = der_encode_to_buffer(&asn_DEF_EuiccConfiguredAddressesRequest, asn1req, ctx->g_asn1_der_request_buf, sizeof(ctx->g_asn1_der_request_buf));
-    ASN_STRUCT_FREE(asn_DEF_EuiccConfiguredAddressesRequest, asn1req);
-    asn1req = NULL;
-    if (asn1erval.encoded == -1)
-    {
-        goto err;
-    }
-
-    ud.smdp = smdp;
-    ud.smds = smds;
-
-    ret = es10x_command_iter(ctx, ctx->g_asn1_der_request_buf, asn1erval.encoded, iter_EuiccConfiguredAddressesResponse, &ud);
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    goto exit;
-
-err:
-    fret = -1;
-exit:
-    if (asn1req)
-    {
-        ASN_STRUCT_FREE(asn_DEF_EuiccConfiguredAddressesRequest, asn1req);
-    }
-
-    return fret;
-}
-
-static int iter_SetDefaultDpAddressResponse(struct apdu_response *response, void *userdata)
-{
-    long *eresult = (long *)userdata;
-    int fret = 0;
-    asn_dec_rval_t asn1drval;
-    SetDefaultDpAddressResponse_t *asn1resp = NULL;
-
-    asn1drval = ber_decode(NULL, &asn_DEF_SetDefaultDpAddressResponse, (void **)&asn1resp, response->data, response->length);
-    if (asn1drval.code != RC_OK)
-    {
-        goto err;
-    }
-
-    asn_INTEGER2long(&asn1resp->setDefaultDpAddressResult, eresult);
-    goto exit;
-
-err:
-    fret = -1;
-exit:
-    if (asn1resp)
-    {
-        ASN_STRUCT_FREE(asn_DEF_SetDefaultDpAddressResponse, asn1resp);
-    }
-
+    free(respbuf);
+    respbuf = NULL;
     return fret;
 }
 
 int es10a_set_default_dp_address(struct euicc_ctx *ctx, const char *smdp)
 {
     int fret = 0;
-    int ret;
-    asn_enc_rval_t asn1erval;
-    SetDefaultDpAddressRequest_t *asn1req = NULL;
-    unsigned long eresult;
+    struct euicc_derutil_node n_request = {
+        .tag = 0xBF3F, // SetDefaultDpAddressRequest
+        .pack = {
+            .child = &(struct euicc_derutil_node){
+                .tag = 0x80,
+                .length = strlen(smdp),
+                .value = (const uint8_t *)smdp,
+            },
+        },
+    };
+    uint32_t reqlen;
+    uint8_t *respbuf = NULL;
+    unsigned resplen;
 
-    asn1req = malloc(sizeof(SetDefaultDpAddressRequest_t));
-    if (!asn1req)
-    {
-        goto err;
-    }
-    memset(asn1req, 0, sizeof(*asn1req));
+    struct euicc_derutil_node tmpnode;
 
-    ret = OCTET_STRING_fromString(&asn1req->defaultDpAddress, smdp);
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    asn1erval = der_encode_to_buffer(&asn_DEF_SetDefaultDpAddressRequest, asn1req, ctx->g_asn1_der_request_buf, sizeof(ctx->g_asn1_der_request_buf));
-    ASN_STRUCT_FREE(asn_DEF_SetDefaultDpAddressRequest, asn1req);
-    asn1req = NULL;
-    if (asn1erval.encoded == -1)
+    reqlen = sizeof(ctx->apdu._internal.request_buffer.body);
+    if (euicc_derutil_pack(ctx->apdu._internal.request_buffer.body, &reqlen, &n_request))
     {
         goto err;
     }
 
-    ret = es10x_command_iter(ctx, ctx->g_asn1_der_request_buf, asn1erval.encoded, iter_SetDefaultDpAddressResponse, &eresult);
-    if (ret < 0)
+    if (es10x_command(ctx, &respbuf, &resplen, ctx->apdu._internal.request_buffer.body, reqlen) < 0)
     {
         goto err;
     }
 
-    fret = eresult;
+    if (euicc_derutil_unpack_find_tag(&tmpnode, n_request.tag, respbuf, resplen) < 0)
+    {
+        goto err;
+    }
+
+    if (euicc_derutil_unpack_find_tag(&tmpnode, 0x80, tmpnode.value, tmpnode.length) < 0)
+    {
+        goto err;
+    }
+
+    fret = euicc_derutil_convert_bin2long(tmpnode.value, tmpnode.length);
+
     goto exit;
 
 err:
     fret = -1;
 exit:
-    if (asn1req)
-    {
-        ASN_STRUCT_FREE(asn_DEF_SetDefaultDpAddressRequest, asn1req);
-    }
-
+    free(respbuf);
+    respbuf = NULL;
     return fret;
+}
+
+void es10a_euicc_configured_addresses_free(struct es10a_euicc_configured_addresses *address)
+{
+    if (!address)
+    {
+        return;
+    }
+    free(address->defaultDpAddress);
+    free(address->rootDsAddress);
+    memset(address, 0x00, sizeof(struct es10a_euicc_configured_addresses));
 }

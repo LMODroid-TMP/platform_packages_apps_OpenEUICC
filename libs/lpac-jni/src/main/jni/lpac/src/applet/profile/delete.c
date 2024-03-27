@@ -5,10 +5,11 @@
 #include <string.h>
 #include <main.h>
 
+#include <euicc/es10c.h>
+
 static int applet_main(int argc, char **argv)
 {
     int ret;
-    int len;
     const char *param;
 
     if (argc < 2)
@@ -18,16 +19,8 @@ static int applet_main(int argc, char **argv)
     }
 
     param = argv[1];
-    len = strlen(param);
 
-    if (len == 32)
-    {
-        ret = es10c_delete_profile_aid(&euicc_ctx, param);
-    }
-    else
-    {
-        ret = es10c_delete_profile_iccid(&euicc_ctx, param);
-    }
+    ret = es10c_delete_profile(&euicc_ctx, param);
 
     if (ret)
     {
