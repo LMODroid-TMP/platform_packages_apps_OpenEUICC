@@ -2,6 +2,7 @@ package im.angry.openeuicc.ui
 
 import android.annotation.SuppressLint
 import android.app.Dialog
+import android.content.DialogInterface
 import android.os.Bundle
 import android.text.Editable
 import android.text.format.Formatter
@@ -16,9 +17,7 @@ import com.google.android.material.textfield.TextInputLayout
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import im.angry.openeuicc.common.R
-import im.angry.openeuicc.util.openEuiccApplication
-import im.angry.openeuicc.util.preferenceRepository
-import im.angry.openeuicc.util.setWidthPercent
+import im.angry.openeuicc.util.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -26,12 +25,15 @@ import kotlinx.coroutines.withContext
 import net.typeblog.lpac_jni.ProfileDownloadCallback
 import kotlin.Exception
 
-class ProfileDownloadFragment : BaseMaterialDialogFragment(), EuiccFragmentMarker, Toolbar.OnMenuItemClickListener {
+class ProfileDownloadFragment : BaseMaterialDialogFragment(),
+    Toolbar.OnMenuItemClickListener, EuiccChannelFragmentMarker {
     companion object {
         const val TAG = "ProfileDownloadFragment"
 
-        fun newInstance(slotId: Int, portId: Int): ProfileDownloadFragment =
-            newInstanceEuicc(ProfileDownloadFragment::class.java, slotId, portId)
+        fun newInstance(slotId: Int, portId: Int, finishWhenDone: Boolean = false): ProfileDownloadFragment =
+            newInstanceEuicc(ProfileDownloadFragment::class.java, slotId, portId) {
+                putBoolean("finishWhenDone", finishWhenDone)
+            }
     }
 
     private lateinit var toolbar: Toolbar
@@ -45,6 +47,10 @@ class ProfileDownloadFragment : BaseMaterialDialogFragment(), EuiccFragmentMarke
     private var freeNvram: Int = -1
 
     private var downloading = false
+
+    private val finishWhenDone by lazy {
+        requireArguments().getBoolean("finishWhenDone", false)
+    }
 
     private val barcodeScannerLauncher = registerForActivityResult(ScanContract()) { result ->
         result.contents?.let { content ->
@@ -63,13 +69,13 @@ class ProfileDownloadFragment : BaseMaterialDialogFragment(), EuiccFragmentMarke
     ): View {
         val view = inflater.inflate(R.layout.fragment_profile_download, container, false)
 
-        toolbar = view.findViewById(R.id.toolbar)
-        profileDownloadServer = view.findViewById(R.id.profile_download_server)
-        profileDownloadCode = view.findViewById(R.id.profile_download_code)
-        profileDownloadConfirmationCode = view.findViewById(R.id.profile_download_confirmation_code)
-        profileDownloadIMEI = view.findViewById(R.id.profile_download_imei)
-        profileDownloadFreeSpace = view.findViewById(R.id.profile_download_free_space)
-        progress = view.findViewById(R.id.progress)
+        toolbar = view.requireViewById(R.id.toolbar)
+        profileDownloadServer = view.requireViewById(R.id.profile_download_server)
+        profileDownloadCode = view.requireViewById(R.id.profile_download_code)
+        profileDownloadConfirmationCode = view.requireViewById(R.id.profile_download_confirmation_code)
+        profileDownloadIMEI = view.requireViewById(R.id.profile_download_imei)
+        profileDownloadFreeSpace = view.requireViewById(R.id.profile_download_free_space)
+        progress = view.requireViewById(R.id.progress)
 
         toolbar.inflateMenu(R.menu.fragment_profile_download)
 
@@ -81,7 +87,9 @@ class ProfileDownloadFragment : BaseMaterialDialogFragment(), EuiccFragmentMarke
         toolbar.apply {
             setTitle(R.string.profile_download)
             setNavigationOnClickListener {
-                if (!downloading) dismiss()
+                if (!downloading) {
+                    dismiss()
+                }
             }
             setOnMenuItemClickListener(this@ProfileDownloadFragment)
         }
@@ -113,7 +121,7 @@ class ProfileDownloadFragment : BaseMaterialDialogFragment(), EuiccFragmentMarke
         super.onStart()
         profileDownloadIMEI.editText!!.text = Editable.Factory.getInstance().newEditable(
             try {
-                openEuiccApplication.telephonyManager.getImei(channel.logicalSlotId)
+                telephonyManager.getImei(channel.logicalSlotId)
             } catch (e: Exception) {
                 ""
             }
@@ -181,18 +189,42 @@ class ProfileDownloadFragment : BaseMaterialDialogFragment(), EuiccFragmentMarke
         }
     }
 
-    private suspend fun doDownloadProfile(server: String, code: String?, confirmationCode: String?, imei: String?) = channel.lpa.beginOperation {
-        downloadProfile(server, code, imei, confirmationCode, object : ProfileDownloadCallback {
-            override fun onStateUpdate(state: ProfileDownloadCallback.DownloadState) {
-                lifecycleScope.launch(Dispatchers.Main) {
-                    progress.isIndeterminate = false
-                    progress.progress = state.progress
+    private suspend fun doDownloadProfile(
+        server: String,
+        code: String?,
+        confirmationCode: String?,
+        imei: String?
+    ) = beginTrackedOperation {
+        channel.lpa.downloadProfile(
+            server,
+            code,
+            imei,
+            confirmationCode,
+            object : ProfileDownloadCallback {
+                override fun onStateUpdate(state: ProfileDownloadCallback.DownloadState) {
+                    lifecycleScope.launch(Dispatchers.Main) {
+                        progress.isIndeterminate = false
+                        progress.progress = state.progress
+                    }
                 }
-            }
-        })
+            })
 
         // If we get here, we are successful
         // Only send notifications if the user allowed us to
         preferenceRepository.notificationDownloadFlow.first()
+    }
+
+    override fun onDismiss(dialog: DialogInterface) {
+        super.onDismiss(dialog)
+        if (finishWhenDone) {
+            activity?.finish()
+        }
+    }
+
+    override fun onCancel(dialog: DialogInterface) {
+        super.onCancel(dialog)
+        if (finishWhenDone) {
+            activity?.finish()
+        }
     }
 }

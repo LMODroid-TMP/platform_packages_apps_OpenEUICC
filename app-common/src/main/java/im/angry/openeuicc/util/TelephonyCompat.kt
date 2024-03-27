@@ -1,9 +1,16 @@
 package im.angry.openeuicc.util
 
+import android.content.Context
 import android.os.Build
 import android.se.omapi.Reader
 import android.se.omapi.SEService
 import android.telephony.TelephonyManager
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlin.coroutines.suspendCoroutine
 
 val TelephonyManager.activeModemCountCompat: Int
     get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {

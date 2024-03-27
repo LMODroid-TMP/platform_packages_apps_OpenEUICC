@@ -14,38 +14,35 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import im.angry.openeuicc.common.R
 import im.angry.openeuicc.core.EuiccChannel
-import im.angry.openeuicc.core.EuiccChannelManager
 import im.angry.openeuicc.util.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-open class MainActivity : AppCompatActivity() {
+open class MainActivity : AppCompatActivity(), OpenEuiccContextMarker {
     companion object {
         const val TAG = "MainActivity"
     }
 
-    protected lateinit var manager: EuiccChannelManager
-
     private lateinit var spinnerAdapter: ArrayAdapter<String>
+    private lateinit var spinnerItem: MenuItem
     private lateinit var spinner: Spinner
 
     private val fragments = arrayListOf<EuiccManagementFragment>()
-
-    private lateinit var noEuiccPlaceholder: View
 
     protected lateinit var tm: TelephonyManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-        setSupportActionBar(findViewById(R.id.toolbar))
+        setSupportActionBar(requireViewById(R.id.toolbar))
 
-        noEuiccPlaceholder = findViewById(R.id.no_euicc_placeholder)
+        supportFragmentManager.beginTransaction().replace(
+            R.id.fragment_root,
+            appContainer.uiComponentFactory.createNoEuiccPlaceholderFragment()
+        ).commit()
 
-        tm = openEuiccApplication.telephonyManager
-
-        manager = openEuiccApplication.euiccChannelManager
+        tm = telephonyManager
 
         spinnerAdapter = ArrayAdapter<String>(this, R.layout.spinner_item)
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
@@ -59,7 +56,11 @@ open class MainActivity : AppCompatActivity() {
         menuInflater.inflate(R.menu.activity_main, menu)
 
         if (!this::spinner.isInitialized) {
-            spinner = menu.findItem(R.id.spinner).actionView as Spinner
+            spinnerItem = menu.findItem(R.id.spinner)
+            spinner = spinnerItem.actionView as Spinner
+            if (spinnerAdapter.isEmpty) {
+                spinnerItem.isVisible = false
+            }
             spinner.adapter = spinnerAdapter
             spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onItemSelected(
@@ -98,31 +99,29 @@ open class MainActivity : AppCompatActivity() {
             else -> super.onOptionsItemSelected(item)
         }
 
-
-    protected open fun createEuiccManagementFragment(channel: EuiccChannel): EuiccManagementFragment =
-        EuiccManagementFragment.newInstance(channel.slotId, channel.portId)
-
     private suspend fun init() {
         withContext(Dispatchers.IO) {
-            manager.enumerateEuiccChannels()
-            manager.knownChannels.forEach {
+            euiccChannelManager.enumerateEuiccChannels()
+            euiccChannelManager.knownChannels.forEach {
                 Log.d(TAG, "slot ${it.slotId} port ${it.portId}")
                 Log.d(TAG, it.lpa.eID)
                 // Request the system to refresh the list of profiles every time we start
                 // Note that this is currently supposed to be no-op when unprivileged,
                 // but it could change in the future
-                manager.notifyEuiccProfilesChanged(it.logicalSlotId)
+                euiccChannelManager.notifyEuiccProfilesChanged(it.logicalSlotId)
             }
         }
 
         withContext(Dispatchers.Main) {
-            manager.knownChannels.sortedBy { it.logicalSlotId }.forEach { channel ->
+            euiccChannelManager.knownChannels.sortedBy { it.logicalSlotId }.forEach { channel ->
                 spinnerAdapter.add(getString(R.string.channel_name_format, channel.logicalSlotId))
-                fragments.add(createEuiccManagementFragment(channel))
+                fragments.add(appContainer.uiComponentFactory.createEuiccManagementFragment(channel))
             }
 
             if (fragments.isNotEmpty()) {
-                noEuiccPlaceholder.visibility = View.GONE
+                if (this@MainActivity::spinner.isInitialized) {
+                    spinnerItem.isVisible = true
+                }
                 supportFragmentManager.beginTransaction().replace(R.id.fragment_root, fragments.first()).commit()
             }
         }

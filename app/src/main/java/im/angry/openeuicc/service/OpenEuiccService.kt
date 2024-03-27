@@ -6,30 +6,23 @@ import android.telephony.euicc.DownloadableSubscription
 import android.telephony.euicc.EuiccInfo
 import android.util.Log
 import net.typeblog.lpac_jni.LocalProfileInfo
-import im.angry.openeuicc.OpenEuiccApplication
 import im.angry.openeuicc.core.EuiccChannel
 import im.angry.openeuicc.util.*
 import java.lang.IllegalStateException
 
-class OpenEuiccService : EuiccService() {
+class OpenEuiccService : EuiccService(), OpenEuiccContextMarker {
     companion object {
         const val TAG = "OpenEuiccService"
     }
 
-    private val openEuiccApplication
-        get() = application as OpenEuiccApplication
-
     private fun findChannel(physicalSlotId: Int): EuiccChannel? =
-        openEuiccApplication.euiccChannelManager
-            .findEuiccChannelByPhysicalSlotBlocking(physicalSlotId)
+        euiccChannelManager.findEuiccChannelByPhysicalSlotBlocking(physicalSlotId)
 
     private fun findChannel(slotId: Int, portId: Int): EuiccChannel? =
-        openEuiccApplication.euiccChannelManager
-            .findEuiccChannelByPortBlocking(slotId, portId)
+        euiccChannelManager.findEuiccChannelByPortBlocking(slotId, portId)
 
     private fun findAllChannels(physicalSlotId: Int): List<EuiccChannel>? =
-        openEuiccApplication.euiccChannelManager
-            .findAllEuiccChannelsByPhysicalSlotBlocking(physicalSlotId)
+        euiccChannelManager.findAllEuiccChannelsByPhysicalSlotBlocking(physicalSlotId)
 
     override fun onGetEid(slotId: Int): String? =
         findChannel(slotId)?.lpa?.eID
@@ -41,7 +34,7 @@ class OpenEuiccService : EuiccService() {
         lpa.profiles.any { it.iccid == iccid }
 
     private fun ensurePortIsMapped(slotId: Int, portId: Int) {
-        val mappings = openEuiccApplication.telephonyManager.simSlotMapping.toMutableList()
+        val mappings = telephonyManager.simSlotMapping.toMutableList()
 
         mappings.firstOrNull { it.physicalSlotIndex == slotId && it.portIndex == portId }?.let {
             throw IllegalStateException("Slot $slotId port $portId has already been mapped")
@@ -57,14 +50,14 @@ class OpenEuiccService : EuiccService() {
         }
 
         try {
-            openEuiccApplication.telephonyManager.simSlotMapping = mappings
+            telephonyManager.simSlotMapping = mappings
             return
         } catch (_: Exception) {
 
         }
 
         // Sometimes hardware supports one ordering but not the reverse
-        openEuiccApplication.telephonyManager.simSlotMapping = mappings.reversed()
+        telephonyManager.simSlotMapping = mappings.reversed()
     }
 
     private fun <T> retryWithTimeout(timeoutMillis: Int, backoff: Int = 1000, f: () -> T?): T? {
@@ -111,9 +104,9 @@ class OpenEuiccService : EuiccService() {
         return GetDefaultDownloadableSubscriptionListResult(RESULT_OK, arrayOf())
     }
 
-    override fun onGetEuiccProfileInfoList(slotId: Int): GetEuiccProfileInfoListResult? {
+    override fun onGetEuiccProfileInfoList(slotId: Int): GetEuiccProfileInfoListResult {
         Log.i(TAG, "onGetEuiccProfileInfoList slotId=$slotId")
-        val channel = findChannel(slotId) ?: return null
+        val channel = findChannel(slotId)!!
         val profiles = channel.lpa.profiles.operational.map {
             EuiccProfileInfo.Builder(it.iccid).apply {
                 setProfileName(it.name)
@@ -233,7 +226,7 @@ class OpenEuiccService : EuiccService() {
         } catch (e: Exception) {
             return RESULT_FIRST_USER
         } finally {
-            openEuiccApplication.euiccChannelManager.invalidate()
+            euiccChannelManager.invalidate()
         }
     }
 
@@ -245,7 +238,7 @@ class OpenEuiccService : EuiccService() {
         }
         val success = channel.lpa
             .setNickname(iccid, nickname!!)
-        openEuiccApplication.subscriptionManager.tryRefreshCachedEuiccInfo(channel.cardId)
+        appContainer.subscriptionManager.tryRefreshCachedEuiccInfo(channel.cardId)
         return if (success) {
             RESULT_OK
         } else {

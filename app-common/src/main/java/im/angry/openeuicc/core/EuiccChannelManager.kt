@@ -1,183 +1,56 @@
 package im.angry.openeuicc.core
 
-import android.content.Context
-import android.os.Handler
-import android.os.HandlerThread
-import android.se.omapi.SEService
-import android.telephony.SubscriptionManager
-import android.util.Log
-import im.angry.openeuicc.OpenEuiccApplication
-import im.angry.openeuicc.util.*
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
-import java.lang.IllegalArgumentException
-import kotlin.coroutines.resume
-import kotlin.coroutines.suspendCoroutine
-
-open class EuiccChannelManager(protected val context: Context) {
-    companion object {
-        const val TAG = "EuiccChannelManager"
-    }
-
-    private val channels = mutableListOf<EuiccChannel>()
-
-    private var seService: SEService? = null
-
-    private val lock = Mutex()
-
-    protected val tm by lazy {
-        (context.applicationContext as OpenEuiccApplication).telephonyManager
-    }
-
-    private val handler = Handler(HandlerThread("BaseEuiccChannelManager").also { it.start() }.looper)
-
-    protected open val uiccCards: Collection<UiccCardInfoCompat>
-        get() = (0..<tm.activeModemCountCompat).map { FakeUiccCardInfoCompat(it) }
-
-    private suspend fun connectSEService(): SEService = suspendCoroutine { cont ->
-        handler.post {
-            var service: SEService? = null
-            service = SEService(context, { handler.post(it) }) {
-                cont.resume(service!!)
-            }
-        }
-    }
-
-    private suspend fun ensureSEService() {
-         if (seService == null) {
-             seService = connectSEService()
-         }
-    }
-
-    protected open fun tryOpenEuiccChannelPrivileged(port: UiccPortInfoCompat): EuiccChannel? {
-        // No-op when unprivileged
-        return null
-    }
-
-    protected fun tryOpenEuiccChannelUnprivileged(port: UiccPortInfoCompat): EuiccChannel? {
-        if (port.portIndex != 0) {
-            Log.w(TAG, "OMAPI channel attempted on non-zero portId, this may or may not work.")
-        }
-
-        Log.i(TAG, "Trying OMAPI for physical slot ${port.card.physicalSlotIndex}")
-        try {
-            return OmapiChannel(seService!!, port)
-        } catch (e: IllegalArgumentException) {
-            // Failed
-            Log.w(TAG, "OMAPI APDU interface unavailable for physical slot ${port.card.physicalSlotIndex}.")
-        }
-
-        return null
-    }
-
-    private suspend fun tryOpenEuiccChannel(port: UiccPortInfoCompat): EuiccChannel? {
-        lock.withLock {
-            ensureSEService()
-            val existing = channels.find { it.slotId == port.card.physicalSlotIndex && it.portId == port.portIndex }
-            if (existing != null) {
-                if (existing.valid && port.logicalSlotIndex == existing.logicalSlotId) {
-                    return existing
-                } else {
-                    existing.close()
-                    channels.remove(existing)
-                }
-            }
-
-            if (port.logicalSlotIndex == SubscriptionManager.INVALID_SIM_SLOT_INDEX) {
-                // We can only open channels on ports that are actually enabled
-                return null
-            }
-
-            var euiccChannel: EuiccChannel? = tryOpenEuiccChannelPrivileged(port)
-
-            if (euiccChannel == null) {
-                euiccChannel = tryOpenEuiccChannelUnprivileged(port)
-            }
-
-            if (euiccChannel != null) {
-                channels.add(euiccChannel)
-            }
-
-            return euiccChannel
-        }
-    }
-
-    fun findEuiccChannelBySlotBlocking(logicalSlotId: Int): EuiccChannel? =
-        runBlocking {
-            withContext(Dispatchers.IO) {
-                for (card in uiccCards) {
-                    for (port in card.ports) {
-                        if (port.logicalSlotIndex == logicalSlotId) {
-                            return@withContext tryOpenEuiccChannel(port)
-                        }
-                    }
-                }
-
-                null
-            }
-        }
-
-    fun findEuiccChannelByPhysicalSlotBlocking(physicalSlotId: Int): EuiccChannel? = runBlocking {
-        withContext(Dispatchers.IO) {
-            for (card in uiccCards) {
-                if (card.physicalSlotIndex != physicalSlotId) continue
-                for (port in card.ports) {
-                    tryOpenEuiccChannel(port)?.let { return@withContext it }
-                }
-            }
-
-            null
-        }
-    }
-
-    fun findAllEuiccChannelsByPhysicalSlotBlocking(physicalSlotId: Int): List<EuiccChannel>? = runBlocking {
-        for (card in uiccCards) {
-            if (card.physicalSlotIndex != physicalSlotId) continue
-            return@runBlocking card.ports.mapNotNull { tryOpenEuiccChannel(it) }
-                .ifEmpty { null }
-        }
-        return@runBlocking null
-    }
-
-    fun findEuiccChannelByPortBlocking(physicalSlotId: Int, portId: Int): EuiccChannel? = runBlocking {
-        withContext(Dispatchers.IO) {
-            uiccCards.find { it.physicalSlotIndex == physicalSlotId }?.let { card ->
-                card.ports.find { it.portIndex == portId }?.let { tryOpenEuiccChannel(it) }
-            }
-        }
-    }
-
-    suspend fun enumerateEuiccChannels() {
-        withContext(Dispatchers.IO) {
-            ensureSEService()
-
-            for (uiccInfo in uiccCards) {
-                for (port in uiccInfo.ports) {
-                    if (tryOpenEuiccChannel(port) != null) {
-                        Log.d(TAG, "Found eUICC on slot ${uiccInfo.physicalSlotIndex} port ${port.portIndex}")
-                    }
-                }
-            }
-        }
-    }
-
+interface EuiccChannelManager {
     val knownChannels: List<EuiccChannel>
-        get() = channels.toList()
 
-    fun invalidate() {
-        for (channel in channels) {
-            channel.close()
-        }
+    /**
+     * Scan all possible sources for EuiccChannels and have them cached for future use
+     */
+    suspend fun enumerateEuiccChannels()
 
-        channels.clear()
-        seService?.shutdown()
-        seService = null
-    }
+    /**
+     * Wait for a slot + port to reconnect (i.e. become valid again)
+     * If the port is currently valid, this function will return immediately.
+     * On timeout, the caller can decide to either try again later, or alert the user with an error
+     */
+    suspend fun waitForReconnect(physicalSlotId: Int, portId: Int, timeoutMillis: Long = 1000)
 
-    open fun notifyEuiccProfilesChanged(logicalSlotId: Int) {
-        // No-op for unprivileged
+    /**
+     * Returns the EuiccChannel corresponding to a **logical** slot
+     */
+    fun findEuiccChannelBySlotBlocking(logicalSlotId: Int): EuiccChannel?
+
+    /**
+     * Returns the first EuiccChannel corresponding to a **physical** slot
+     * If the physical slot supports MEP and has multiple ports, it is undefined
+     * which of the two channels will be returned.
+     */
+    fun findEuiccChannelByPhysicalSlotBlocking(physicalSlotId: Int): EuiccChannel?
+
+    /**
+     * Returns all EuiccChannels corresponding to a **physical** slot
+     * Multiple channels are possible in the case of MEP
+     */
+    suspend fun findAllEuiccChannelsByPhysicalSlot(physicalSlotId: Int): List<EuiccChannel>?
+    fun findAllEuiccChannelsByPhysicalSlotBlocking(physicalSlotId: Int): List<EuiccChannel>?
+
+    /**
+     * Returns the EuiccChannel corresponding to a **physical** slot and a port ID
+     */
+    suspend fun findEuiccChannelByPort(physicalSlotId: Int, portId: Int): EuiccChannel?
+    fun findEuiccChannelByPortBlocking(physicalSlotId: Int, portId: Int): EuiccChannel?
+
+    /**
+     * Invalidate all EuiccChannels previously known by this Manager
+     */
+    fun invalidate()
+
+    /**
+     * If possible, trigger the system to update the cached list of profiles
+     * This is only expected to be implemented when the application is privileged
+     * TODO: Remove this from the common interface
+     */
+    fun notifyEuiccProfilesChanged(logicalSlotId: Int) {
+        // no-op by default
     }
 }

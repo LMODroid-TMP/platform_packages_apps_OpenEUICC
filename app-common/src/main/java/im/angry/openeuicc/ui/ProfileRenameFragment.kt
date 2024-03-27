@@ -6,21 +6,20 @@ import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.view.Window
 import android.widget.ProgressBar
 import android.widget.Toast
 import androidx.appcompat.widget.Toolbar
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.textfield.TextInputLayout
 import im.angry.openeuicc.common.R
-import im.angry.openeuicc.util.setWidthPercent
+import im.angry.openeuicc.util.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.lang.Exception
 import java.lang.RuntimeException
 
-class ProfileRenameFragment : BaseMaterialDialogFragment(), EuiccFragmentMarker {
+class ProfileRenameFragment : BaseMaterialDialogFragment(), EuiccChannelFragmentMarker {
     companion object {
         const val TAG = "ProfileRenameFragment"
 
@@ -47,9 +46,9 @@ class ProfileRenameFragment : BaseMaterialDialogFragment(), EuiccFragmentMarker 
     ): View {
         val view = inflater.inflate(R.layout.fragment_profile_rename, container, false)
 
-        toolbar = view.findViewById(R.id.toolbar)
-        profileRenameNewName = view.findViewById(R.id.profile_rename_new_name)
-        progress = view.findViewById(R.id.progress)
+        toolbar = view.requireViewById(R.id.toolbar)
+        profileRenameNewName = view.requireViewById(R.id.profile_rename_new_name)
+        progress = view.requireViewById(R.id.progress)
 
         toolbar.inflateMenu(R.menu.fragment_profile_rename)
 
