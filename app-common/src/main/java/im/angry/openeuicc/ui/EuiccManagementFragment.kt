@@ -16,6 +16,7 @@ import android.widget.ImageButton
 import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -26,12 +27,13 @@ import net.typeblog.lpac_jni.LocalProfileInfo
 import im.angry.openeuicc.common.R
 import im.angry.openeuicc.util.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.lang.Exception
 
-open class EuiccManagementFragment : Fragment(), EuiccFragmentMarker, EuiccProfilesChangedListener {
+open class EuiccManagementFragment : Fragment(), EuiccProfilesChangedListener,
+    EuiccChannelFragmentMarker {
     companion object {
         const val TAG = "EuiccManagementFragment"
 
@@ -57,9 +59,9 @@ open class EuiccManagementFragment : Fragment(), EuiccFragmentMarker, EuiccProfi
     ): View {
         val view = inflater.inflate(R.layout.fragment_euicc, container, false)
 
-        swipeRefresh = view.findViewById(R.id.swipe_refresh)
-        fab = view.findViewById(R.id.fab)
-        profileList = view.findViewById(R.id.profile_list)
+        swipeRefresh = view.requireViewById(R.id.swipe_refresh)
+        fab = view.requireViewById(R.id.fab)
+        profileList = view.requireViewById(R.id.profile_list)
 
         return view
     }
@@ -129,34 +131,50 @@ open class EuiccManagementFragment : Fragment(), EuiccFragmentMarker, EuiccProfi
         fab.isEnabled = false
 
         lifecycleScope.launch {
-            try {
-                if (enable) {
-                    doEnableProfile(iccid)
+            beginTrackedOperation {
+                val res = if (enable) {
+                    channel.lpa.enableProfile(iccid)
                 } else {
-                    doDisableProfile(iccid)
+                    channel.lpa.disableProfile(iccid)
                 }
-                refresh()
-                fab.isEnabled = true
-            } catch (e: Exception) {
-                Log.d(TAG, "Failed to enable / disable profile $iccid")
-                Log.d(TAG, Log.getStackTraceString(e))
-                fab.isEnabled = true
-                Toast.makeText(context, R.string.toast_profile_enable_failed, Toast.LENGTH_LONG).show()
+
+                if (!res) {
+                    Log.d(TAG, "Failed to enable / disable profile $iccid")
+                    Toast.makeText(context, R.string.toast_profile_enable_failed, Toast.LENGTH_LONG)
+                        .show()
+                    return@beginTrackedOperation false
+                }
+
+                try {
+                    euiccChannelManager.waitForReconnect(slotId, portId, timeoutMillis = 30 * 1000)
+                } catch (e: TimeoutCancellationException) {
+                    withContext(Dispatchers.Main) {
+                        // Timed out waiting for SIM to come back online, we can no longer assume that the LPA is still valid
+                        AlertDialog.Builder(requireContext()).apply {
+                            setMessage(R.string.enable_disable_timeout)
+                            setPositiveButton(android.R.string.ok) { dialog, _ ->
+                                dialog.dismiss()
+                                requireActivity().finish()
+                            }
+                            setOnDismissListener { _ ->
+                                requireActivity().finish()
+                            }
+                            show()
+                        }
+                    }
+                    return@beginTrackedOperation false
+                }
+
+                if (enable) {
+                    preferenceRepository.notificationEnableFlow.first()
+                } else {
+                    preferenceRepository.notificationDisableFlow.first()
+                }
             }
+            refresh()
+            fab.isEnabled = true
         }
     }
-
-    private suspend fun doEnableProfile(iccid: String) =
-        channel.lpa.beginOperation {
-            channel.lpa.enableProfile(iccid, reconnectTimeout = 15 * 1000) &&
-                preferenceRepository.notificationEnableFlow.first()
-        }
-
-    private suspend fun doDisableProfile(iccid: String) =
-        channel.lpa.beginOperation {
-            channel.lpa.disableProfile(iccid, reconnectTimeout = 15 * 1000) &&
-                preferenceRepository.notificationDisableFlow.first()
-        }
 
     protected open fun populatePopupWithProfileActions(popup: PopupMenu, profile: LocalProfileInfo) {
         popup.inflate(R.menu.profile_options)
@@ -190,11 +208,11 @@ open class EuiccManagementFragment : Fragment(), EuiccFragmentMarker, EuiccProfi
     }
 
     inner class ProfileViewHolder(private val root: View) : ViewHolder(root) {
-        private val iccid: TextView = root.findViewById(R.id.iccid)
-        private val name: TextView = root.findViewById(R.id.name)
-        private val state: TextView = root.findViewById(R.id.state)
-        private val provider: TextView = root.findViewById(R.id.provider)
-        private val profileMenu: ImageButton = root.findViewById(R.id.profile_menu)
+        private val iccid: TextView = root.requireViewById(R.id.iccid)
+        private val name: TextView = root.requireViewById(R.id.name)
+        private val state: TextView = root.requireViewById(R.id.state)
+        private val provider: TextView = root.requireViewById(R.id.provider)
+        private val profileMenu: ImageButton = root.requireViewById(R.id.profile_menu)
 
         init {
             iccid.setOnClickListener {

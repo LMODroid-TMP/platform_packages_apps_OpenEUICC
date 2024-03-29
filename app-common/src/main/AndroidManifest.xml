@@ -6,8 +6,7 @@
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.INTERNET" />
 
-    <application
-        android:networkSecurityConfig="@xml/network_security_config">
+    <application>
         <activity
             android:name="im.angry.openeuicc.ui.SettingsActivity"
             android:label="@string/pref_settings" />
@@ -15,6 +14,15 @@
         <activity
             android:name="im.angry.openeuicc.ui.NotificationsActivity"
             android:label="@string/profile_notifications" />
+
+        <activity
+            android:name="im.angry.openeuicc.ui.DirectProfileDownloadActivity"
+            android:label="@string/profile_download"
+            android:theme="@style/Theme.AppCompat.Translucent" />
+
+        <activity
+            android:name="im.angry.openeuicc.ui.LogsActivity"
+            android:label="@string/pref_advanced_logs" />
 
         <activity
             android:name="com.journeyapps.barcodescanner.CaptureActivity"

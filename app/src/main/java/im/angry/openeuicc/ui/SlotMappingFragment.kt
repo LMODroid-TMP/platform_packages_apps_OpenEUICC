@@ -26,17 +26,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-class SlotMappingFragment: BaseMaterialDialogFragment(), OnMenuItemClickListener {
+class SlotMappingFragment: BaseMaterialDialogFragment(),
+    OnMenuItemClickListener, OpenEuiccContextMarker {
     companion object {
         const val TAG = "SlotMappingFragment"
     }
 
-    private val tm: TelephonyManager by lazy {
-        (requireContext().applicationContext as OpenEuiccApplication).telephonyManager
-    }
-
     private val ports: List<UiccPortInfoCompat> by lazy {
-        tm.uiccCardsInfoCompat.flatMap { it.ports }
+        telephonyManager.uiccCardsInfoCompat.flatMap { it.ports }
     }
 
     private val portsDesc: List<String> by lazy {
@@ -54,12 +51,12 @@ class SlotMappingFragment: BaseMaterialDialogFragment(), OnMenuItemClickListener
         savedInstanceState: Bundle?
     ): View? {
         val view = inflater.inflate(R.layout.fragment_slot_mapping, container, false)
-        toolbar = view.findViewById(R.id.toolbar)
+        toolbar = view.requireViewById(R.id.toolbar)
         toolbar.inflateMenu(R.menu.fragment_slot_mapping)
-        recyclerView = view.findViewById(R.id.mapping_list)
+        recyclerView = view.requireViewById(R.id.mapping_list)
         recyclerView.layoutManager =
             LinearLayoutManager(view.context, LinearLayoutManager.VERTICAL, false)
-        helpTextView = view.findViewById(R.id.mapping_help)
+        helpTextView = view.requireViewById(R.id.mapping_help)
         return view
     }
 
@@ -80,7 +77,7 @@ class SlotMappingFragment: BaseMaterialDialogFragment(), OnMenuItemClickListener
     private fun init() {
         lifecycleScope.launch(Dispatchers.Main) {
             val mapping = withContext(Dispatchers.IO) {
-                tm.simSlotMapping
+                telephonyManager.simSlotMapping
             }
 
             adapter = SlotMappingAdapter(mapping.toMutableList().apply {
@@ -99,14 +96,14 @@ class SlotMappingFragment: BaseMaterialDialogFragment(), OnMenuItemClickListener
                 withContext(Dispatchers.IO) {
                     // Use the utility method from PrivilegedTelephonyUtils to ensure
                     // unmapped ports have all profiles disabled
-                    tm.updateSimSlotMapping(openEuiccApplication.euiccChannelManager, adapter.mappings)
+                    telephonyManager.updateSimSlotMapping(euiccChannelManager, adapter.mappings)
                 }
             } catch (e: Exception) {
                 Toast.makeText(requireContext(), R.string.slot_mapping_failure, Toast.LENGTH_LONG).show()
                 return@launch
             }
             Toast.makeText(requireContext(), R.string.slot_mapping_completed, Toast.LENGTH_LONG).show()
-            openEuiccApplication.euiccChannelManager.invalidate()
+            euiccChannelManager.invalidate()
             requireActivity().finish()
         }
     }
@@ -114,7 +111,7 @@ class SlotMappingFragment: BaseMaterialDialogFragment(), OnMenuItemClickListener
     private suspend fun buildHelpText() = withContext(Dispatchers.IO) {
         val nLogicalSlots = adapter.mappings.size
 
-        val cards = openEuiccApplication.telephonyManager.uiccCardsInfoCompat
+        val cards = telephonyManager.uiccCardsInfoCompat
 
         val nPhysicalSlots = cards.size
         var idxMepCard = -1
@@ -128,7 +125,7 @@ class SlotMappingFragment: BaseMaterialDialogFragment(), OnMenuItemClickListener
         }
 
         val mayEnableDSDS =
-            openEuiccApplication.telephonyManager.supportsDSDS && !openEuiccApplication.telephonyManager.dsdsEnabled
+            telephonyManager.supportsDSDS && !telephonyManager.dsdsEnabled
         val extraText =
             if (nLogicalSlots == 1 && mayEnableDSDS) {
                 getString(R.string.slot_mapping_help_dsds)
@@ -151,8 +148,8 @@ class SlotMappingFragment: BaseMaterialDialogFragment(), OnMenuItemClickListener
         }
 
     inner class ViewHolder(root: View): RecyclerView.ViewHolder(root), OnItemSelectedListener {
-        private val textViewLogicalSlot: TextView = root.findViewById(R.id.slot_mapping_logical_slot)
-        private val spinnerPorts: Spinner = root.findViewById(R.id.slot_mapping_ports)
+        private val textViewLogicalSlot: TextView = root.requireViewById(R.id.slot_mapping_logical_slot)
+        private val spinnerPorts: Spinner = root.requireViewById(R.id.slot_mapping_ports)
 
         init {
             spinnerPorts.adapter = ArrayAdapter(requireContext(), im.angry.openeuicc.common.R.layout.spinner_item, portsDesc)

@@ -1,8 +1,8 @@
+#include "euicc.private.h"
 #include "es10b.h"
-#include "es10x.private.h"
 
-#include "hexutil.h"
 #include "derutil.h"
+#include "hexutil.h"
 #include "base64.h"
 #include "sha256.h"
 
@@ -12,613 +12,402 @@
 #include <unistd.h>
 #include <string.h>
 
-#include "asn1c/asn1/BoundProfilePackage.h"
-#include "asn1c/asn1/ProfileInstallationResult.h"
-#include "asn1c/asn1/GetEuiccChallengeRequest.h"
-#include "asn1c/asn1/GetEuiccChallengeResponse.h"
-#include "asn1c/asn1/GetEuiccInfo1Request.h"
-#include "asn1c/asn1/ListNotificationRequest.h"
-#include "asn1c/asn1/ListNotificationResponse.h"
-#include "asn1c/asn1/RetrieveNotificationsListRequest.h"
-#include "asn1c/asn1/RetrieveNotificationsListResponse.h"
-#include "asn1c/asn1/NotificationSentRequest.h"
-#include "asn1c/asn1/NotificationSentResponse.h"
-#include "asn1c/asn1/CtxParams1.h"
-
-int es10b_prepare_download(struct euicc_ctx *ctx, char **b64_response, struct es10b_prepare_download_param *param)
+int es10b_prepare_download_r(struct euicc_ctx *ctx, char **b64_PrepareDownloadResponse, struct es10b_prepare_download_param *param, struct es10b_prepare_download_param_user *param_user)
 {
     int fret = 0;
-    uint8_t *reqbuf = NULL, *reqwptr = NULL;
-    unsigned reqlen;
-    uint8_t *respbuf = NULL;
-    unsigned resplen;
-
-    *b64_response = NULL;
-
-    reqlen = 0;
-    reqlen += 7; // PrepareDownload Tag + Length (MAX)
-    reqlen += euicc_base64_decode_len(param->b64_smdp_signed_2);
-    reqlen += euicc_base64_decode_len(param->b64_smdp_signature_2);
-    reqlen += SHA256_BLOCK_SIZE + 1 + 1; // hashCC + tag + len
-    reqlen += euicc_base64_decode_len(param->b64_smdp_certificate);
-
-    reqbuf = malloc(reqlen);
-    if (!reqbuf)
-    {
-        goto err;
-    }
-    memset(reqbuf, 0, reqlen);
-
-    reqwptr = reqbuf;
-    reqwptr += 7; // Skip Tag + Length
-    reqwptr += euicc_base64_decode(reqwptr, param->b64_smdp_signed_2);
-    reqwptr += euicc_base64_decode(reqwptr, param->b64_smdp_signature_2);
-    if (param->hexstr_transcation_id && param->str_checkcode)
-    {
-        EUICC_SHA256_CTX sha256ctx;
-        uint8_t hashCC[SHA256_BLOCK_SIZE];
-        uint8_t merged[sizeof(hashCC) + 16];
-        int mergedlen;
-
-        memset(&sha256ctx, 0, sizeof(sha256ctx));
-        euicc_sha256_init(&sha256ctx);
-        euicc_sha256_update(&sha256ctx, (uint8_t *)param->str_checkcode, strlen(param->str_checkcode));
-        euicc_sha256_final(&sha256ctx, hashCC);
-
-        memcpy(merged, hashCC, sizeof(hashCC));
-        mergedlen = euicc_hexutil_hex2bin(merged + sizeof(hashCC), sizeof(merged) - sizeof(hashCC), param->hexstr_transcation_id);
-        if (mergedlen < 0)
-        {
-            goto err;
-        }
-        mergedlen += sizeof(hashCC);
-
-        memset(&sha256ctx, 0, sizeof(sha256ctx));
-        euicc_sha256_init(&sha256ctx);
-        euicc_sha256_update(&sha256ctx, merged, mergedlen);
-        euicc_sha256_final(&sha256ctx, hashCC);
-
-        *reqwptr++ = 0x04;
-        *reqwptr++ = sizeof(hashCC);
-        memcpy(reqwptr, hashCC, sizeof(hashCC));
-        reqwptr += sizeof(hashCC);
-    }
-    reqwptr += euicc_base64_decode(reqwptr, param->b64_smdp_certificate);
-
-    reqlen = reqwptr - reqbuf; // re-calculated length, for not accounting base64_decode_len
-
-    reqwptr = euicc_derutil_tag_leftpad(reqbuf, reqlen, 7, 0xBF21);
-    reqlen = reqlen - (reqwptr - reqbuf); // re-calculated length, for add tag and length
-
-    if (es10x_command(ctx, &respbuf, &resplen, reqwptr, reqlen) < 0)
-    {
-        goto err;
-    }
-    free(reqbuf);
-    reqbuf = NULL;
-
-    *b64_response = malloc(euicc_base64_encode_len(resplen));
-    if (!(*b64_response))
-    {
-        goto err;
-    }
-    euicc_base64_encode(*b64_response, respbuf, resplen);
-
-    goto exit;
-
-err:
-    fret = -1;
-    free(reqbuf);
-exit:
-    return fret;
-}
-
-int es10b_load_bound_profile_package(struct euicc_ctx *ctx, const char *b64_bpp)
-{
-    int fret = 0, ret;
-    uint8_t *bpp_buf = NULL;
-    int bpp_len;
-    uint8_t prefix_len;
-    asn_dec_rval_t asn1drval_bpp;
-    BoundProfilePackage_t *bpp_asn1 = NULL;
-    asn_enc_rval_t asn1erval;
     uint8_t *reqbuf = NULL;
-    int reqlen;
-    uint8_t *ptrtmp;
-    struct
-    {
-        uint8_t *buf;
-        int len;
-    } apdus[64];
-    int apdus_count = 0;
-    ProfileInstallationResult_t *asn1resp = NULL;
+    uint32_t reqlen;
+    uint8_t *respbuf = NULL;
+    unsigned resplen;
 
-    bpp_buf = malloc(euicc_base64_decode_len(b64_bpp));
-    if (!bpp_buf)
-    {
-        goto err;
-    }
-    if ((bpp_len = euicc_base64_decode(bpp_buf, b64_bpp)) < 0)
+    EUICC_SHA256_CTX sha256ctx;
+    uint8_t hashCC[SHA256_BLOCK_SIZE];
+
+    uint8_t *smdpSigned2 = NULL, *smdpSignature2 = NULL, *smdpCertificate = NULL;
+    int smdpSigned2_len, smdpSignature2_len, smdpCertificate_len;
+    struct euicc_derutil_node n_request, n_smdpSigned2, n_smdpSignature2, n_smdpCertificate, n_hashCc, n_transactionId, n_ccRequiredFlag;
+
+    *b64_PrepareDownloadResponse = NULL;
+
+    memset(&n_request, 0, sizeof(n_request));
+    memset(&n_smdpSigned2, 0, sizeof(n_smdpSigned2));
+    memset(&n_smdpSignature2, 0, sizeof(n_smdpSignature2));
+    memset(&n_smdpCertificate, 0, sizeof(n_smdpCertificate));
+    memset(&n_hashCc, 0, sizeof(n_hashCc));
+
+    smdpSigned2 = malloc(euicc_base64_decode_len(param->b64_smdpSigned2));
+    if (!smdpSigned2)
     {
         goto err;
     }
 
-    asn1drval_bpp = ber_decode(NULL, &asn_DEF_BoundProfilePackage, (void **)&bpp_asn1, bpp_buf, bpp_len);
-    if (asn1drval_bpp.code != RC_OK)
+    smdpSignature2 = malloc(euicc_base64_decode_len(param->b64_smdpSignature2));
+    if (!smdpSignature2)
     {
         goto err;
     }
 
-    ret = euicc_derutil_tag_find(&ptrtmp, bpp_buf, bpp_len, NULL, 1);
-    if (ret < 0)
+    smdpCertificate = malloc(euicc_base64_decode_len(param->b64_smdpCertificate));
+    if (!smdpCertificate)
     {
         goto err;
     }
-    prefix_len = ptrtmp - bpp_buf;
 
-    asn1erval = der_encode(&asn_DEF_InitialiseSecureChannelRequest, (void **)&bpp_asn1->initialiseSecureChannelRequest, NULL, NULL);
-    if (asn1erval.encoded == -1)
+    if ((smdpSigned2_len = euicc_base64_decode(smdpSigned2, param->b64_smdpSigned2)) < 0)
     {
         goto err;
     }
-    reqlen = asn1erval.encoded + prefix_len;
-    reqbuf = malloc(reqlen);
-    if (!reqlen)
-    {
-        goto err;
-    }
-    memcpy(reqbuf, bpp_buf, prefix_len);
-    asn1erval = der_encode_to_buffer(&asn_DEF_InitialiseSecureChannelRequest, &bpp_asn1->initialiseSecureChannelRequest, reqbuf + prefix_len, reqlen - prefix_len);
-    if (asn1erval.encoded == -1)
-    {
-        goto err;
-    }
-    reqlen = asn1erval.encoded + prefix_len;
 
-    apdus[apdus_count].buf = reqbuf;
-    apdus[apdus_count].len = reqlen;
-    apdus_count++;
-    reqbuf = NULL;
+    if ((smdpSignature2_len = euicc_base64_decode(smdpSignature2, param->b64_smdpSignature2)) < 0)
+    {
+        goto err;
+    }
 
-    asn1erval = der_encode(&asn_DEF_SeqBoundProfilePackageTLV87, &bpp_asn1->firstSequenceOf87, NULL, NULL);
-    if (asn1erval.encoded == -1)
+    if ((smdpCertificate_len = euicc_base64_decode(smdpCertificate, param->b64_smdpCertificate)) < 0)
     {
         goto err;
     }
-    reqlen = asn1erval.encoded;
-    reqbuf = malloc(reqlen);
-    if (!reqlen)
-    {
-        goto err;
-    }
-    asn1erval = der_encode_to_buffer(&asn_DEF_SeqBoundProfilePackageTLV87, &bpp_asn1->firstSequenceOf87, reqbuf, reqlen);
-    if (asn1erval.encoded == -1)
-    {
-        goto err;
-    }
-    reqlen = asn1erval.encoded;
 
-    apdus[apdus_count].buf = reqbuf;
-    apdus[apdus_count].len = reqlen;
-    apdus_count++;
-    reqbuf = NULL;
-
-    asn1erval = der_encode(&asn_DEF_SeqBoundProfilePackageTLV88, &bpp_asn1->sequenceOf88, NULL, NULL);
-    if (asn1erval.encoded == -1)
+    if (euicc_derutil_unpack_find_tag(&n_smdpSigned2, 0x30, smdpSigned2, smdpSigned2_len) < 0)
     {
         goto err;
     }
-    reqlen = asn1erval.encoded;
-    reqbuf = malloc(reqlen);
-    if (!reqlen)
+
+    if (euicc_derutil_unpack_find_tag(&n_smdpSignature2, 0x5F37, smdpSignature2, smdpSignature2_len) < 0)
     {
         goto err;
     }
-    asn1erval = der_encode_to_buffer(&asn_DEF_SeqBoundProfilePackageTLV88, &bpp_asn1->sequenceOf88, reqbuf, reqlen);
-    if (asn1erval.encoded == -1)
+
+    if (euicc_derutil_unpack_find_tag(&n_smdpCertificate, 0x30, smdpCertificate, smdpCertificate_len) < 0)
     {
         goto err;
     }
-    reqlen = asn1erval.encoded;
 
-    ret = euicc_derutil_tag_find(&ptrtmp, reqbuf, reqlen, NULL, 1);
-    if (ret < 0)
+    if (euicc_derutil_unpack_find_tag(&n_transactionId, 0x80, n_smdpSigned2.value, n_smdpSigned2.length) < 0)
     {
         goto err;
     }
-    reqlen = ptrtmp - reqbuf;
 
-    apdus[apdus_count].buf = reqbuf;
-    apdus[apdus_count].len = reqlen;
-    apdus_count++;
-    reqbuf = NULL;
-
-    for (int i = 0; i < bpp_asn1->sequenceOf88.list.count; i++)
+    if (euicc_derutil_unpack_find_tag(&n_ccRequiredFlag, 0x01, n_smdpSigned2.value, n_smdpSigned2.length) < 0)
     {
-        asn1erval = der_encode(&asn_DEF_BoundProfilePackageTLV88, bpp_asn1->sequenceOf88.list.array[i], NULL, NULL);
-        if (asn1erval.encoded == -1)
+        goto err;
+    }
+
+    n_request.tag = 0xBF21;
+    n_request.pack.child = &n_smdpSigned2;
+    n_smdpSigned2.pack.next = &n_smdpSignature2;
+
+    if (euicc_derutil_convert_bin2long(n_ccRequiredFlag.value, n_ccRequiredFlag.length))
+    {
+        if ((!param_user->confirmationCode) || (strlen(param_user->confirmationCode) == 0))
         {
             goto err;
         }
-        reqlen = asn1erval.encoded;
-        reqbuf = malloc(reqlen);
-        if (!reqlen)
-        {
-            goto err;
-        }
-        asn1erval = der_encode_to_buffer(&asn_DEF_BoundProfilePackageTLV88, bpp_asn1->sequenceOf88.list.array[i], reqbuf, reqlen);
-        if (asn1erval.encoded == -1)
-        {
-            goto err;
-        }
-        reqlen = asn1erval.encoded;
 
-        apdus[apdus_count].buf = reqbuf;
-        apdus[apdus_count].len = reqlen;
-        apdus_count++;
-        reqbuf = NULL;
+        memset(&sha256ctx, 0, sizeof(sha256ctx));
+        euicc_sha256_init(&sha256ctx);
+        euicc_sha256_update(&sha256ctx, (const uint8_t *)param_user->confirmationCode, strlen(param_user->confirmationCode));
+        euicc_sha256_final(&sha256ctx, hashCC);
+
+        memset(&sha256ctx, 0, sizeof(sha256ctx));
+        euicc_sha256_init(&sha256ctx);
+        euicc_sha256_update(&sha256ctx, hashCC, sizeof(hashCC));
+        euicc_sha256_update(&sha256ctx, n_transactionId.value, n_transactionId.length);
+        euicc_sha256_final(&sha256ctx, hashCC);
+
+        n_hashCc.tag = 0x04;
+        n_hashCc.value = hashCC;
+        n_hashCc.length = sizeof(hashCC);
+
+        n_smdpSignature2.pack.next = &n_hashCc;
+        n_hashCc.pack.next = &n_smdpCertificate;
     }
-
-    if (bpp_asn1->secondSequenceOf87)
+    else
     {
-        asn1erval = der_encode(&asn_DEF_SeqSecondBoundProfilePackageTLV87, bpp_asn1->secondSequenceOf87, NULL, NULL);
-        if (asn1erval.encoded == -1)
-        {
-            goto err;
-        }
-        reqlen = asn1erval.encoded;
-        reqbuf = malloc(reqlen);
-        if (!reqlen)
-        {
-            goto err;
-        }
-        asn1erval = der_encode_to_buffer(&asn_DEF_SeqSecondBoundProfilePackageTLV87, bpp_asn1->secondSequenceOf87, reqbuf, reqlen);
-        if (asn1erval.encoded == -1)
-        {
-            goto err;
-        }
-        reqlen = asn1erval.encoded;
-
-        apdus[apdus_count].buf = reqbuf;
-        apdus[apdus_count].len = reqlen;
-        apdus_count++;
-        reqbuf = NULL;
+        n_smdpSignature2.pack.next = &n_smdpCertificate;
     }
 
-    asn1erval = der_encode(&asn_DEF_SeqBoundProfilePackageTLV86, &bpp_asn1->sequenceOf86, NULL, NULL);
-    if (asn1erval.encoded == -1)
+    if (euicc_derutil_pack_alloc(&reqbuf, &reqlen, &n_request) < 0)
     {
         goto err;
     }
-    reqlen = asn1erval.encoded;
-    reqbuf = malloc(reqlen);
-    if (!reqlen)
+
+    free(smdpSigned2);
+    smdpSigned2 = NULL;
+    free(smdpSignature2);
+    smdpSignature2 = NULL;
+    free(smdpCertificate);
+    smdpCertificate = NULL;
+
+    if (es10x_command(ctx, &respbuf, &resplen, reqbuf, reqlen) < 0)
     {
         goto err;
     }
-    asn1erval = der_encode_to_buffer(&asn_DEF_SeqBoundProfilePackageTLV86, &bpp_asn1->sequenceOf86, reqbuf, reqlen);
-    if (asn1erval.encoded == -1)
-    {
-        goto err;
-    }
-    reqlen = asn1erval.encoded;
 
-    ret = euicc_derutil_tag_find(&ptrtmp, reqbuf, reqlen, NULL, 1);
-    if (ret < 0)
-    {
-        goto err;
-    }
-    reqlen = ptrtmp - reqbuf;
-
-    apdus[apdus_count].buf = reqbuf;
-    apdus[apdus_count].len = reqlen;
-    apdus_count++;
-    reqbuf = NULL;
-
-    for (int i = 0; i < bpp_asn1->sequenceOf86.list.count; i++)
-    {
-        asn1erval = der_encode(&asn_DEF_BoundProfilePackageTLV86, bpp_asn1->sequenceOf86.list.array[i], NULL, NULL);
-        if (asn1erval.encoded == -1)
-        {
-            goto err;
-        }
-        reqlen = asn1erval.encoded;
-        reqbuf = malloc(reqlen);
-        if (!reqlen)
-        {
-            goto err;
-        }
-        asn1erval = der_encode_to_buffer(&asn_DEF_BoundProfilePackageTLV86, bpp_asn1->sequenceOf86.list.array[i], reqbuf, reqlen);
-        if (asn1erval.encoded == -1)
-        {
-            goto err;
-        }
-        reqlen = asn1erval.encoded;
-
-        apdus[apdus_count].buf = reqbuf;
-        apdus[apdus_count].len = reqlen;
-        apdus_count++;
-        reqbuf = NULL;
-    }
-
-    // for (int i = 0; i < apdus_count; i++)
-    // {
-    //     printf("APDU[%d]: ", i);
-    //     for (int j = 0; j < apdus[i].len; j++)
-    //     {
-    //         printf("%02X", apdus[i].buf[j]);
-    //     }
-    //     printf("\n");
-    // }
-
-    for (int i = 0; i < apdus_count; i++)
-    {
-        uint8_t *respbuf = NULL;
-        unsigned resplen = 0;
-        asn_dec_rval_t asn1drval;
-
-        ret = es10x_command(ctx, &respbuf, &resplen, apdus[i].buf, apdus[i].len);
-        if (ret < 0)
-        {
-            goto err;
-        }
-        if (resplen > 0)
-        {
-            asn1drval = ber_decode(NULL, &asn_DEF_ProfileInstallationResult, (void **)&asn1resp, respbuf, resplen);
-            free(respbuf);
-            respbuf = NULL;
-            resplen = 0;
-            if (asn1drval.code != RC_OK)
-            {
-                goto err;
-            }
-            if (asn1resp->profileInstallationResultData.finalResult.present != ProfileInstallationResultData__finalResult_PR_successResult)
-            {
-                goto err;
-            }
-            break;
-        }
-        free(respbuf);
-        respbuf = NULL;
-        resplen = 0;
-    }
-
-    goto exit;
-
-err:
-    fret = -1;
-exit:
-    free(bpp_buf);
     free(reqbuf);
-    for (int i = 0; i < apdus_count; i++)
-    {
-        free(apdus[i].buf);
-    }
-    ASN_STRUCT_FREE(asn_DEF_BoundProfilePackage, bpp_asn1);
-    ASN_STRUCT_FREE(asn_DEF_ProfileInstallationResult, asn1resp);
-    return fret;
-}
+    reqbuf = NULL;
 
-int es10b_get_euicc_challenge(struct euicc_ctx *ctx, char **b64_payload)
-{
-    int fret = 0;
-    uint8_t *respbuf = NULL;
-    unsigned resplen;
-    asn_enc_rval_t asn1erval;
-    asn_dec_rval_t asn1drval;
-    GetEuiccChallengeRequest_t *asn1req = NULL;
-    GetEuiccChallengeResponse_t *asn1resp = NULL;
-
-    asn1req = malloc(sizeof(GetEuiccChallengeRequest_t));
-    if (!asn1req)
-    {
-        goto err;
-    }
-    memset(asn1req, 0, sizeof(*asn1req));
-
-    asn1erval = der_encode_to_buffer(&asn_DEF_GetEuiccChallengeRequest, asn1req, ctx->g_asn1_der_request_buf, sizeof(ctx->g_asn1_der_request_buf));
-    ASN_STRUCT_FREE(asn_DEF_GetEuiccChallengeRequest, asn1req);
-    asn1req = NULL;
-    if (asn1erval.encoded == -1)
+    *b64_PrepareDownloadResponse = malloc(euicc_base64_encode_len(resplen));
+    if (!(*b64_PrepareDownloadResponse))
     {
         goto err;
     }
 
-    if (es10x_command(ctx, &respbuf, &resplen, ctx->g_asn1_der_request_buf, asn1erval.encoded) < 0)
+    if (euicc_base64_encode(*b64_PrepareDownloadResponse, respbuf, resplen) < 0)
     {
         goto err;
     }
 
-    asn1drval = ber_decode(NULL, &asn_DEF_GetEuiccChallengeResponse, (void **)&asn1resp, respbuf, resplen);
-    free(respbuf);
-    respbuf = NULL;
-
-    if (asn1drval.code != RC_OK)
-    {
-        goto err;
-    }
-
-    *b64_payload = malloc(euicc_base64_encode_len(asn1resp->euiccChallenge.size));
-    if (!(*b64_payload))
-    {
-        goto err;
-    }
-    if (euicc_base64_encode(*b64_payload, asn1resp->euiccChallenge.buf, asn1resp->euiccChallenge.size) < 0)
-    {
-        goto err;
-    }
+    fret = 0;
 
     goto exit;
 
 err:
     fret = -1;
-    free(*b64_payload);
-    *b64_payload = NULL;
+    free(*b64_PrepareDownloadResponse);
+    *b64_PrepareDownloadResponse = NULL;
 exit:
-    free(respbuf);
-    ASN_STRUCT_FREE(asn_DEF_GetEuiccChallengeRequest, asn1req);
-    ASN_STRUCT_FREE(asn_DEF_GetEuiccChallengeResponse, asn1resp);
-
-    return fret;
-}
-
-int es10b_get_euicc_info(struct euicc_ctx *ctx, char **b64_payload)
-{
-    int fret = 0;
-    uint8_t *respbuf = NULL;
-    unsigned resplen;
-    asn_enc_rval_t asn1erval;
-    GetEuiccInfo1Request_t *asn1req = NULL;
-
-    *b64_payload = NULL;
-
-    asn1req = malloc(sizeof(GetEuiccInfo1Request_t));
-    if (!asn1req)
-    {
-        goto err;
-    }
-    memset(asn1req, 0, sizeof(*asn1req));
-
-    asn1erval = der_encode_to_buffer(&asn_DEF_GetEuiccInfo1Request, asn1req, ctx->g_asn1_der_request_buf, sizeof(ctx->g_asn1_der_request_buf));
-    ASN_STRUCT_FREE(asn_DEF_GetEuiccInfo1Request, asn1req);
-    asn1req = NULL;
-    if (asn1erval.encoded == -1)
-    {
-        goto err;
-    }
-
-    if (es10x_command(ctx, &respbuf, &resplen, ctx->g_asn1_der_request_buf, asn1erval.encoded) < 0)
-    {
-        goto err;
-    }
-
-    *b64_payload = malloc(euicc_base64_encode_len(resplen));
-    if (!(*b64_payload))
-    {
-        goto err;
-    }
-    if (euicc_base64_encode(*b64_payload, respbuf, resplen) < 0)
-    {
-        goto err;
-    }
-
-    goto exit;
-
-err:
-    fret = -1;
-    free(*b64_payload);
-    *b64_payload = NULL;
-exit:
-    free(respbuf);
-    ASN_STRUCT_FREE(asn_DEF_GetEuiccInfo1Request, asn1req);
-
-    return fret;
-}
-
-int es10b_list_notification(struct euicc_ctx *ctx, struct es10b_notification_metadata **metadatas, int *metadatas_count)
-{
-    int fret = 0;
-    uint8_t *respbuf = NULL;
-    unsigned resplen;
-    asn_enc_rval_t asn1erval;
-    asn_dec_rval_t asn1drval;
-    ListNotificationRequest_t *asn1req = NULL;
-    ListNotificationResponse_t *asn1resp = NULL;
-
-    *metadatas = NULL;
-    *metadatas_count = 0;
-
-    asn1req = malloc(sizeof(ListNotificationRequest_t));
-    if (!asn1req)
-    {
-        goto err;
-    }
-    memset(asn1req, 0, sizeof(*asn1req));
-
-    asn1erval = der_encode_to_buffer(&asn_DEF_ListNotificationRequest, asn1req, ctx->g_asn1_der_request_buf, sizeof(ctx->g_asn1_der_request_buf));
-    ASN_STRUCT_FREE(asn_DEF_ListNotificationRequest, asn1req);
-    asn1req = NULL;
-    if (asn1erval.encoded == -1)
-    {
-        goto err;
-    }
-
-    if (es10x_command(ctx, &respbuf, &resplen, ctx->g_asn1_der_request_buf, asn1erval.encoded) < 0)
-    {
-        goto err;
-    }
-
-    asn1drval = ber_decode(NULL, &asn_DEF_ListNotificationResponse, (void **)&asn1resp, respbuf, resplen);
+    free(smdpSigned2);
+    smdpSigned2 = NULL;
+    free(smdpSignature2);
+    smdpSignature2 = NULL;
+    free(smdpCertificate);
+    smdpCertificate = NULL;
+    free(reqbuf);
+    reqbuf = NULL;
     free(respbuf);
     respbuf = NULL;
+    return fret;
+}
 
-    if (asn1drval.code != RC_OK)
+static int es10b_load_bound_profile_package_tx(struct euicc_ctx *ctx, struct es10b_load_bound_profile_package_result *result, const uint8_t *reqbuf, int reqbuf_len)
+{
+    int fret = 0;
+    uint8_t *respbuf = NULL;
+    unsigned resplen;
+
+    result->bppCommandId = ES10B_BPP_COMMAND_ID_UNDEFINED;
+    result->errorReason = ES10B_ERROR_REASON_UNDEFINED;
+
+    if (es10x_command(ctx, &respbuf, &resplen, reqbuf, reqbuf_len) < 0)
     {
         goto err;
     }
 
-    if (asn1resp->present != ListNotificationResponse_PR_notificationMetadataList)
+    if (resplen > 0)
     {
-        goto err;
-    }
+        struct euicc_derutil_node tmpnode, n_finalResult;
 
-    *metadatas_count = asn1resp->choice.notificationMetadataList.list.count;
-    *metadatas = malloc(sizeof(struct es10b_notification_metadata) * (*metadatas_count));
-    if (!(*metadatas))
-    {
-        goto err;
-    }
-
-    for (int i = 0; i < *metadatas_count; i++)
-    {
-        struct NotificationMetadata *asn1metadata = asn1resp->choice.notificationMetadataList.list.array[i];
-        struct es10b_notification_metadata *metadata = &((*metadatas)[i]);
-
-        memset(metadata, 0, sizeof(*metadata));
-        asn_INTEGER2ulong(&asn1metadata->seqNumber, &metadata->seqNumber);
-
-        switch (asn1metadata->profileManagementOperation.buf[0])
+        if (euicc_derutil_unpack_find_tag(&tmpnode, 0xBF37, respbuf, resplen) < 0) // ProfileInstallationResult
         {
-        case 128:
-            metadata->profileManagementOperation = strdup("install");
-            break;
-        case 64:
-            metadata->profileManagementOperation = strdup("enable");
-            break;
-        case 32:
-            metadata->profileManagementOperation = strdup("disable");
-            break;
-        case 16:
-            metadata->profileManagementOperation = strdup("delete");
-            break;
+            goto err;
         }
 
-        metadata->notificationAddress = malloc(asn1metadata->notificationAddress.size + 1);
-        if (metadata->notificationAddress)
+        if (euicc_derutil_unpack_find_tag(&tmpnode, 0xBF27, tmpnode.value, tmpnode.length) < 0) // ProfileInstallationResultData
         {
-            memcpy(metadata->notificationAddress, asn1metadata->notificationAddress.buf, asn1metadata->notificationAddress.size);
-            metadata->notificationAddress[asn1metadata->notificationAddress.size] = '\0';
-        }
-        else
-        {
-            metadata->notificationAddress = NULL;
+            goto err;
         }
 
-        if (asn1metadata->iccid)
+        if (euicc_derutil_unpack_find_tag(&tmpnode, 0xA2, tmpnode.value, tmpnode.length) < 0) // finalResult
         {
-            metadata->iccid = malloc((asn1metadata->iccid->size * 2) + 1);
-            if (metadata->iccid)
+            goto err;
+        }
+
+        if (euicc_derutil_unpack_first(&n_finalResult, tmpnode.value, tmpnode.length) < 0)
+        {
+            goto err;
+        }
+
+        switch (n_finalResult.tag)
+        {
+        case 0xA0: // SuccessResult
+            break;
+        case 0xA1: // ErrorResult
+            tmpnode.self.ptr = n_finalResult.value;
+            tmpnode.self.length = 0;
+            while (euicc_derutil_unpack_next(&tmpnode, &tmpnode, n_finalResult.value, n_finalResult.length) == 0)
             {
-                if (euicc_hexutil_bin2gsmbcd(metadata->iccid, (asn1metadata->iccid->size * 2) + 1, asn1metadata->iccid->buf, asn1metadata->iccid->size) < 0)
+                int tmpint;
+                switch (tmpnode.tag)
                 {
-                    free(metadata->iccid);
-                    metadata->iccid = NULL;
+                case 0x80:
+                    tmpint = euicc_derutil_convert_bin2long(tmpnode.value, tmpnode.length);
+                    switch (tmpint)
+                    {
+                    case ES10B_BPP_COMMAND_ID_INITIALISE_SECURE_CHANNEL:
+                    case ES10B_BPP_COMMAND_ID_CONFIGURE_ISDP:
+                    case ES10B_BPP_COMMAND_ID_STORE_METADATA:
+                    case ES10B_BPP_COMMAND_ID_STORE_METADATA2:
+                    case ES10B_BPP_COMMAND_ID_REPLACE_SESSION_KEYS:
+                    case ES10B_BPP_COMMAND_ID_LOAD_PROFILE_ELEMENTS:
+                        result->bppCommandId = tmpint;
+                        break;
+                    default:
+                        result->bppCommandId = ES10B_BPP_COMMAND_ID_UNDEFINED;
+                        break;
+                    }
+                    break;
+                case 0x81:
+                    tmpint = euicc_derutil_convert_bin2long(tmpnode.value, tmpnode.length);
+                    switch (tmpint)
+                    {
+                    case ES10B_ERROR_REASON_INCORRECT_INPUT_VALUES:
+                    case ES10B_ERROR_REASON_INVALID_SIGNATURE:
+                    case ES10B_ERROR_REASON_INVALID_TRANSACTION_ID:
+                    case ES10B_ERROR_REASON_UNSUPPORTED_CRT_VALUES:
+                    case ES10B_ERROR_REASON_UNSUPPORTED_REMOTE_OPERATION_TYPE:
+                    case ES10B_ERROR_REASON_UNSUPPORTED_PROFILE_CLASS:
+                    case ES10B_ERROR_REASON_SCP03T_STRUCTURE_ERROR:
+                    case ES10B_ERROR_REASON_SCP03T_SECURITY_ERROR:
+                    case ES10B_ERROR_REASON_INSTALL_FAILED_DUE_TO_ICCID_ALREADY_EXISTS_ON_EUICC:
+                    case ES10B_ERROR_REASON_INSTALL_FAILED_DUE_TO_INSUFFICIENT_MEMORY_FOR_PROFILE:
+                    case ES10B_ERROR_REASON_INSTALL_FAILED_DUE_TO_INTERRUPTION:
+                    case ES10B_ERROR_REASON_INSTALL_FAILED_DUE_TO_PE_PROCESSING_ERROR:
+                    case ES10B_ERROR_REASON_INSTALL_FAILED_DUE_TO_ICCID_MISMATCH:
+                    case ES10B_ERROR_REASON_TEST_PROFILE_INSTALL_FAILED_DUE_TO_INVALID_NAA_KEY:
+                    case ES10B_ERROR_REASON_PPR_NOT_ALLOWED:
+                    case ES10B_ERROR_REASON_INSTALL_FAILED_DUE_TO_UNKNOWN_ERROR:
+                        result->errorReason = tmpint;
+                        break;
+                    default:
+                        result->errorReason = ES10B_ERROR_REASON_UNDEFINED;
+                        break;
+                    }
+                    break;
                 }
             }
+            goto err;
+        default:
+            goto err;
         }
-        else
+    }
+
+    fret = 0;
+    goto exit;
+
+err:
+    fret = -1;
+exit:
+    free(respbuf);
+    respbuf = NULL;
+    return fret;
+}
+
+int es10b_load_bound_profile_package_r(struct euicc_ctx *ctx, struct es10b_load_bound_profile_package_result *result, const char *b64_BoundProfilePackage)
+{
+    int fret = 0;
+
+    uint8_t *bpp = NULL;
+    int bpp_len;
+
+    const uint8_t *reqbuf;
+    int reqbuf_len;
+
+    struct euicc_derutil_node tmpnode, tmpchildnode, n_BoundProfilePackage;
+
+    bpp = malloc(euicc_base64_decode_len(b64_BoundProfilePackage));
+    if (!bpp)
+    {
+        goto err;
+    }
+    if ((bpp_len = euicc_base64_decode(bpp, b64_BoundProfilePackage)) < 0)
+    {
+        goto err;
+    }
+
+    if (euicc_derutil_unpack_find_tag(&n_BoundProfilePackage, 0xBF36, bpp, bpp_len) < 0)
+    {
+        goto err;
+    }
+
+    if (euicc_derutil_unpack_find_tag(&tmpnode, 0xBF23, n_BoundProfilePackage.value, n_BoundProfilePackage.length) < 0)
+    {
+        goto err;
+    }
+
+    reqbuf = n_BoundProfilePackage.self.ptr;
+    reqbuf_len = tmpnode.self.ptr - n_BoundProfilePackage.self.ptr + tmpnode.self.length;
+
+    if (es10b_load_bound_profile_package_tx(ctx, result, reqbuf, reqbuf_len) < 0)
+    {
+        goto err;
+    }
+
+    if (euicc_derutil_unpack_find_tag(&tmpnode, 0xA0, n_BoundProfilePackage.value, n_BoundProfilePackage.length) < 0)
+    {
+        goto err;
+    }
+
+    reqbuf = tmpnode.self.ptr;
+    reqbuf_len = tmpnode.self.length;
+
+    if (es10b_load_bound_profile_package_tx(ctx, result, reqbuf, reqbuf_len) < 0)
+    {
+        goto err;
+    }
+
+    if (euicc_derutil_unpack_find_tag(&tmpnode, 0xA1, n_BoundProfilePackage.value, n_BoundProfilePackage.length) < 0)
+    {
+        goto err;
+    }
+
+    reqbuf = tmpnode.self.ptr;
+    reqbuf_len = tmpnode.value - tmpnode.self.ptr;
+
+    if (es10b_load_bound_profile_package_tx(ctx, result, reqbuf, reqbuf_len) < 0)
+    {
+        goto err;
+    }
+
+    tmpchildnode.self.ptr = tmpnode.value;
+    tmpchildnode.self.length = 0;
+
+    while (euicc_derutil_unpack_next(&tmpchildnode, &tmpchildnode, tmpnode.value, tmpnode.length) == 0)
+    {
+        reqbuf = tmpchildnode.self.ptr;
+        reqbuf_len = tmpchildnode.self.length;
+
+        if (es10b_load_bound_profile_package_tx(ctx, result, reqbuf, reqbuf_len) < 0)
         {
-            metadata->iccid = NULL;
+            goto err;
+        }
+    }
+
+    if (euicc_derutil_unpack_find_tag(&tmpnode, 0xA2, n_BoundProfilePackage.value, n_BoundProfilePackage.length) == 0)
+    {
+        reqbuf = tmpnode.self.ptr;
+        reqbuf_len = tmpnode.self.length;
+
+        if (es10b_load_bound_profile_package_tx(ctx, result, reqbuf, reqbuf_len) < 0)
+        {
+            goto err;
+        }
+    }
+
+    if (euicc_derutil_unpack_find_tag(&tmpnode, 0xA3, n_BoundProfilePackage.value, n_BoundProfilePackage.length) < 0)
+    {
+        goto err;
+    }
+
+    reqbuf = tmpnode.self.ptr;
+    reqbuf_len = tmpnode.value - tmpnode.self.ptr;
+
+    if (es10b_load_bound_profile_package_tx(ctx, result, reqbuf, reqbuf_len) < 0)
+    {
+        goto err;
+    }
+
+    tmpchildnode.self.ptr = tmpnode.value;
+    tmpchildnode.self.length = 0;
+
+    while (euicc_derutil_unpack_next(&tmpchildnode, &tmpchildnode, tmpnode.value, tmpnode.length) == 0)
+    {
+        reqbuf = tmpchildnode.self.ptr;
+        reqbuf_len = tmpchildnode.self.length;
+
+        if (es10b_load_bound_profile_package_tx(ctx, result, reqbuf, reqbuf_len) < 0)
+        {
+            goto err;
         }
     }
 
@@ -626,356 +415,798 @@ int es10b_list_notification(struct euicc_ctx *ctx, struct es10b_notification_met
 
 err:
     fret = -1;
-    free(*metadatas);
-    *metadatas = NULL;
-    *metadatas_count = 0;
+exit:
+    free(bpp);
+    bpp = NULL;
+    return fret;
+}
+
+int es10b_get_euicc_challenge_r(struct euicc_ctx *ctx, char **b64_euiccChallenge)
+{
+    int fret = 0;
+    struct euicc_derutil_node n_request = {
+        .tag = 0xBF2E, // GetEuiccDataRequest
+    };
+    uint32_t reqlen;
+    uint8_t *respbuf = NULL;
+    unsigned resplen;
+
+    struct euicc_derutil_node tmpnode;
+
+    reqlen = sizeof(ctx->apdu._internal.request_buffer.body);
+    if (euicc_derutil_pack(ctx->apdu._internal.request_buffer.body, &reqlen, &n_request))
+    {
+        goto err;
+    }
+
+    if (es10x_command(ctx, &respbuf, &resplen, ctx->apdu._internal.request_buffer.body, reqlen) < 0)
+    {
+        goto err;
+    }
+
+    if (euicc_derutil_unpack_find_tag(&tmpnode, n_request.tag, respbuf, resplen))
+    {
+        goto err;
+    }
+
+    if (euicc_derutil_unpack_find_tag(&tmpnode, 0x80, tmpnode.value, tmpnode.length))
+    {
+        goto err;
+    }
+
+    *b64_euiccChallenge = malloc(euicc_base64_encode_len(tmpnode.length));
+    if (!(*b64_euiccChallenge))
+    {
+        goto err;
+    }
+    if (euicc_base64_encode(*b64_euiccChallenge, tmpnode.value, tmpnode.length) < 0)
+    {
+        goto err;
+    }
+
+    goto exit;
+
+err:
+    fret = -1;
+    free(*b64_euiccChallenge);
+    *b64_euiccChallenge = NULL;
 exit:
     free(respbuf);
-    ASN_STRUCT_FREE(asn_DEF_ListNotificationRequest, asn1req);
-    ASN_STRUCT_FREE(asn_DEF_ListNotificationResponse, asn1resp);
+    respbuf = NULL;
+    return fret;
+}
+
+int es10b_get_euicc_info_r(struct euicc_ctx *ctx, char **b64_EUICCInfo1)
+{
+    int fret = 0;
+    struct euicc_derutil_node n_request = {
+        .tag = 0xBF20, // GetEuiccInfo1Request
+    };
+    uint32_t reqlen;
+    uint8_t *respbuf = NULL;
+    unsigned resplen;
+
+    struct euicc_derutil_node tmpnode;
+
+    reqlen = sizeof(ctx->apdu._internal.request_buffer.body);
+    if (euicc_derutil_pack(ctx->apdu._internal.request_buffer.body, &reqlen, &n_request))
+    {
+        goto err;
+    }
+
+    if (es10x_command(ctx, &respbuf, &resplen, ctx->apdu._internal.request_buffer.body, reqlen) < 0)
+    {
+        goto err;
+    }
+
+    if (euicc_derutil_unpack_find_tag(&tmpnode, n_request.tag, respbuf, resplen))
+    {
+        goto err;
+    }
+
+    *b64_EUICCInfo1 = malloc(euicc_base64_encode_len(tmpnode.self.length));
+    if (!(*b64_EUICCInfo1))
+    {
+        goto err;
+    }
+    if (euicc_base64_encode(*b64_EUICCInfo1, tmpnode.self.ptr, tmpnode.self.length) < 0)
+    {
+        goto err;
+    }
+
+    goto exit;
+
+err:
+    fret = -1;
+    free(*b64_EUICCInfo1);
+    *b64_EUICCInfo1 = NULL;
+exit:
+    free(respbuf);
+    respbuf = NULL;
+    return fret;
+}
+
+int es10b_authenticate_server_r(struct euicc_ctx *ctx, char **b64_AuthenticateServerResponse, struct es10b_authenticate_server_param *param, struct es10b_authenticate_server_param_user *param_user)
+{
+    int fret = 0;
+    uint8_t *reqbuf = NULL;
+    uint32_t reqlen;
+    uint8_t *respbuf = NULL;
+    unsigned resplen;
+
+    uint8_t imei[8];
+    uint8_t *serverSigned1 = NULL, *serverSignature1 = NULL, *euiccCiPKIdToBeUsed = NULL, *serverCertificate = NULL;
+    int serverSigned1_len, serverSignature1_len, euiccCiPKIdToBeUsed_len, serverCertificate_len;
+    struct euicc_derutil_node n_request, n_serverSigned1, n_serverSignature1, n_euiccCiPKIdToBeUsed, n_serverCertificate, n_CtxParams1, n_matchingId, n_deviceInfo, n_tac, n_deviceCapabilities, n_imei;
+
+    *b64_AuthenticateServerResponse = NULL;
+
+    memset(&n_request, 0, sizeof(n_request));
+    memset(&n_serverSigned1, 0, sizeof(n_serverSigned1));
+    memset(&n_serverSignature1, 0, sizeof(n_serverSignature1));
+    memset(&n_euiccCiPKIdToBeUsed, 0, sizeof(n_euiccCiPKIdToBeUsed));
+    memset(&n_serverCertificate, 0, sizeof(n_serverCertificate));
+    memset(&n_CtxParams1, 0, sizeof(n_CtxParams1));
+    memset(&n_matchingId, 0, sizeof(n_matchingId));
+    memset(&n_deviceInfo, 0, sizeof(n_deviceInfo));
+    memset(&n_tac, 0, sizeof(n_tac));
+    memset(&n_deviceCapabilities, 0, sizeof(n_deviceCapabilities));
+    memset(&n_imei, 0, sizeof(n_imei));
+
+    serverSigned1 = malloc(euicc_base64_decode_len(param->b64_serverSigned1));
+    if (!serverSigned1)
+    {
+        goto err;
+    }
+
+    serverSignature1 = malloc(euicc_base64_decode_len(param->b64_serverSignature1));
+    if (!serverSignature1)
+    {
+        goto err;
+    }
+
+    euiccCiPKIdToBeUsed = malloc(euicc_base64_decode_len(param->b64_euiccCiPKIdToBeUsed));
+    if (!euiccCiPKIdToBeUsed)
+    {
+        goto err;
+    }
+
+    serverCertificate = malloc(euicc_base64_decode_len(param->b64_serverCertificate));
+    if (!serverCertificate)
+    {
+        goto err;
+    }
+
+    if ((serverSigned1_len = euicc_base64_decode(serverSigned1, param->b64_serverSigned1)) < 0)
+    {
+        goto err;
+    }
+
+    if ((serverSignature1_len = euicc_base64_decode(serverSignature1, param->b64_serverSignature1)) < 0)
+    {
+        goto err;
+    }
+
+    if ((euiccCiPKIdToBeUsed_len = euicc_base64_decode(euiccCiPKIdToBeUsed, param->b64_euiccCiPKIdToBeUsed)) < 0)
+    {
+        goto err;
+    }
+
+    if ((serverCertificate_len = euicc_base64_decode(serverCertificate, param->b64_serverCertificate)) < 0)
+    {
+        goto err;
+    }
+
+    if (euicc_derutil_unpack_find_tag(&n_serverSigned1, 0x30, serverSigned1, serverSigned1_len) < 0)
+    {
+        goto err;
+    }
+
+    if (euicc_derutil_unpack_find_tag(&n_serverSignature1, 0x5F37, serverSignature1, serverSignature1_len) < 0)
+    {
+        goto err;
+    }
+
+    if (euicc_derutil_unpack_find_tag(&n_euiccCiPKIdToBeUsed, 0x04, euiccCiPKIdToBeUsed, euiccCiPKIdToBeUsed_len) < 0)
+    {
+        goto err;
+    }
+
+    if (euicc_derutil_unpack_find_tag(&n_serverCertificate, 0x30, serverCertificate, serverCertificate_len) < 0)
+    {
+        goto err;
+    }
+
+    n_request.tag = 0xBF38;
+    n_request.pack.child = &n_serverSigned1;
+    n_serverSigned1.pack.next = &n_serverSignature1;
+    n_serverSignature1.pack.next = &n_euiccCiPKIdToBeUsed;
+    n_euiccCiPKIdToBeUsed.pack.next = &n_serverCertificate;
+    n_serverCertificate.pack.next = &n_CtxParams1;
+    n_CtxParams1.tag = 0xA0;
+
+    n_deviceInfo.tag = 0xA1;
+    n_deviceInfo.pack.child = &n_tac;
+    n_tac.tag = 0x80;
+    n_tac.value = imei;
+    n_tac.length = 4;
+    n_tac.pack.next = &n_deviceCapabilities;
+    n_deviceCapabilities.tag = 0xA1;
+    if (param_user->imei)
+    {
+        int imei_len;
+
+        imei_len = euicc_hexutil_gsmbcd2bin(imei, sizeof(imei), param_user->imei);
+        if (imei_len < 0)
+        {
+            goto err;
+        }
+
+        n_deviceCapabilities.pack.next = &n_imei;
+        n_imei.tag = 0x82;
+        n_imei.value = imei;
+        n_imei.length = imei_len;
+    }
+    else
+    {
+        memcpy(imei, (uint8_t[]){0x35, 0x29, 0x06, 0x11}, 4);
+    }
+
+    if (param_user->matchingId)
+    {
+        n_CtxParams1.pack.child = &n_matchingId;
+        n_matchingId.tag = 0x80;
+        n_matchingId.value = (const uint8_t *)param_user->matchingId;
+        n_matchingId.length = strlen(param_user->matchingId);
+        n_matchingId.pack.next = &n_deviceInfo;
+    }
+    else
+    {
+        n_CtxParams1.pack.child = &n_deviceInfo;
+    }
+
+    if (euicc_derutil_pack_alloc(&reqbuf, &reqlen, &n_request) < 0)
+    {
+        goto err;
+    }
+
+    free(serverSigned1);
+    serverSigned1 = NULL;
+    free(serverSignature1);
+    serverSignature1 = NULL;
+    free(euiccCiPKIdToBeUsed);
+    euiccCiPKIdToBeUsed = NULL;
+    free(serverCertificate);
+    serverCertificate = NULL;
+
+    if (es10x_command(ctx, &respbuf, &resplen, reqbuf, reqlen) < 0)
+    {
+        goto err;
+    }
+
+    free(reqbuf);
+    reqbuf = NULL;
+
+    *b64_AuthenticateServerResponse = malloc(euicc_base64_encode_len(resplen));
+    if (!(*b64_AuthenticateServerResponse))
+    {
+        goto err;
+    }
+
+    if (euicc_base64_encode(*b64_AuthenticateServerResponse, respbuf, resplen) < 0)
+    {
+        goto err;
+    }
+
+    fret = 0;
+
+    goto exit;
+
+err:
+    fret = -1;
+    free(*b64_AuthenticateServerResponse);
+    *b64_AuthenticateServerResponse = NULL;
+exit:
+    free(serverSigned1);
+    serverSigned1 = NULL;
+    free(serverSignature1);
+    serverSignature1 = NULL;
+    free(euiccCiPKIdToBeUsed);
+    euiccCiPKIdToBeUsed = NULL;
+    free(serverCertificate);
+    serverCertificate = NULL;
+    free(reqbuf);
+    reqbuf = NULL;
+    free(respbuf);
+    respbuf = NULL;
+    return fret;
+}
+
+int es10b_cancel_session_r(struct euicc_ctx *ctx, char **b64_CancelSessionResponse, struct es10b_cancel_session_param *param)
+{
+    return -1;
+}
+
+void es10b_prepare_download_param_free(struct es10b_prepare_download_param *param)
+{
+    if (!param)
+    {
+        return;
+    }
+
+    free(param->b64_profileMetadata);
+    free(param->b64_smdpCertificate);
+    free(param->b64_smdpSignature2);
+    free(param->b64_smdpSigned2);
+
+    memset(param, 0x00, sizeof(*param));
+}
+
+void es10b_authenticate_server_param_free(struct es10b_authenticate_server_param *param)
+{
+    if (!param)
+    {
+        return;
+    }
+
+    free(param->b64_euiccCiPKIdToBeUsed);
+    free(param->b64_serverCertificate);
+    free(param->b64_serverSignature1);
+    free(param->b64_serverSigned1);
+
+    memset(param, 0x00, sizeof(*param));
+}
+
+int es10b_prepare_download(struct euicc_ctx *ctx, const char *confirmationCode)
+{
+    int fret;
+
+    struct es10b_prepare_download_param_user param_user = {
+        .confirmationCode = confirmationCode,
+    };
+
+    if (ctx->http._internal.b64_prepare_download_response)
+    {
+        return -1;
+    }
+
+    if (ctx->http._internal.prepare_download_param == NULL)
+    {
+        return -1;
+    }
+
+    fret = es10b_prepare_download_r(ctx, &ctx->http._internal.b64_prepare_download_response, ctx->http._internal.prepare_download_param, &param_user);
+    if (fret < 0)
+    {
+        ctx->http._internal.b64_prepare_download_response = NULL;
+        return fret;
+    }
+
+    es10b_prepare_download_param_free(ctx->http._internal.prepare_download_param);
+    free(ctx->http._internal.prepare_download_param);
+    ctx->http._internal.prepare_download_param = NULL;
 
     return fret;
 }
 
-int es10b_retrieve_notification(struct euicc_ctx *ctx, char **b64_payload, char **receiver, unsigned long seqNumber)
+int es10b_load_bound_profile_package(struct euicc_ctx *ctx, struct es10b_load_bound_profile_package_result *result)
+{
+    int fret;
+
+    if (ctx->http._internal.b64_bound_profile_package == NULL)
+    {
+        return -1;
+    }
+
+    fret = es10b_load_bound_profile_package_r(ctx, result, ctx->http._internal.b64_bound_profile_package);
+    if (fret < 0)
+    {
+        return fret;
+    }
+
+    free(ctx->http._internal.b64_bound_profile_package);
+    ctx->http._internal.b64_bound_profile_package = NULL;
+
+    return fret;
+}
+
+int es10b_get_euicc_challenge_and_info(struct euicc_ctx *ctx)
+{
+    int fret;
+
+    if (ctx->http._internal.b64_euicc_challenge)
+    {
+        return -1;
+    }
+
+    if (ctx->http._internal.b64_euicc_info_1)
+    {
+        return -1;
+    }
+
+    fret = es10b_get_euicc_challenge_r(ctx, &ctx->http._internal.b64_euicc_challenge);
+    if (fret < 0)
+    {
+        goto err;
+    }
+
+    fret = es10b_get_euicc_info_r(ctx, &ctx->http._internal.b64_euicc_info_1);
+    if (fret < 0)
+    {
+        goto err;
+    }
+
+    return fret;
+
+err:
+    free(ctx->http._internal.b64_euicc_challenge);
+    ctx->http._internal.b64_euicc_challenge = NULL;
+    free(ctx->http._internal.b64_euicc_info_1);
+    ctx->http._internal.b64_euicc_info_1 = NULL;
+
+    return -1;
+}
+
+int es10b_authenticate_server(struct euicc_ctx *ctx, const char *matchingId, const char *imei)
+{
+    int fret;
+
+    struct es10b_authenticate_server_param_user param_user = {
+        .matchingId = matchingId,
+        .imei = imei,
+    };
+
+    if (ctx->http._internal.b64_authenticate_server_response)
+    {
+        return -1;
+    }
+
+    if (ctx->http._internal.authenticate_server_param == NULL)
+    {
+        return -1;
+    }
+
+    fret = es10b_authenticate_server_r(ctx, &ctx->http._internal.b64_authenticate_server_response, ctx->http._internal.authenticate_server_param, &param_user);
+    if (fret < 0)
+    {
+        ctx->http._internal.b64_authenticate_server_response = NULL;
+        return fret;
+    }
+
+    es10b_authenticate_server_param_free(ctx->http._internal.authenticate_server_param);
+    free(ctx->http._internal.authenticate_server_param);
+    ctx->http._internal.authenticate_server_param = NULL;
+
+    return fret;
+}
+
+int es10b_cancel_session(struct euicc_ctx *ctx)
+{
+    return -1;
+}
+
+int es10b_list_notification(struct euicc_ctx *ctx, struct es10b_notification_metadata_list **notificationMetadataList)
 {
     int fret = 0;
+    struct euicc_derutil_node n_request = {
+        .tag = 0xBF28, // ListNotificationRequest
+    };
+    uint32_t reqlen;
     uint8_t *respbuf = NULL;
     unsigned resplen;
-    asn_enc_rval_t asn1erval;
-    asn_dec_rval_t asn1drval;
-    RetrieveNotificationsListRequest_t *asn1req = NULL;
-    RetrieveNotificationsListResponse_t *asn1resp = NULL;
-    PendingNotification_t *asn1notification;
-    NotificationMetadata_t *asn1metadata;
-    uint8_t *payload = NULL;
-    unsigned payload_length = 0;
 
-    *b64_payload = NULL;
-    *receiver = NULL;
+    struct euicc_derutil_node tmpnode, n_notificationMetadataList, n_NotificationMetadata;
 
-    asn1req = malloc(sizeof(RetrieveNotificationsListRequest_t));
-    if (!asn1req)
-    {
-        goto err;
-    }
-    memset(asn1req, 0, sizeof(*asn1req));
+    struct es10b_notification_metadata_list *list_wptr = NULL;
 
-    asn1req->searchCriteria = malloc(sizeof(struct RetrieveNotificationsListRequest__searchCriteria));
-    if (!asn1req->searchCriteria)
-    {
-        goto err;
-    }
-    memset(asn1req->searchCriteria, 0, sizeof(*asn1req->searchCriteria));
+    *notificationMetadataList = NULL;
 
-    asn1req->searchCriteria->present = RetrieveNotificationsListRequest__searchCriteria_PR_seqNumber;
-    if (asn_ulong2INTEGER(&asn1req->searchCriteria->choice.seqNumber, seqNumber) < 0)
+    reqlen = sizeof(ctx->apdu._internal.request_buffer.body);
+    if (euicc_derutil_pack(ctx->apdu._internal.request_buffer.body, &reqlen, &n_request))
     {
         goto err;
     }
 
-    asn1erval = der_encode_to_buffer(&asn_DEF_RetrieveNotificationsListRequest, asn1req, ctx->g_asn1_der_request_buf, sizeof(ctx->g_asn1_der_request_buf));
-    ASN_STRUCT_FREE(asn_DEF_RetrieveNotificationsListRequest, asn1req);
-    asn1req = NULL;
-    if (asn1erval.encoded == -1)
+    if (es10x_command(ctx, &respbuf, &resplen, ctx->apdu._internal.request_buffer.body, reqlen) < 0)
     {
         goto err;
     }
 
-    if (es10x_command(ctx, &respbuf, &resplen, ctx->g_asn1_der_request_buf, asn1erval.encoded) < 0)
+    if (euicc_derutil_unpack_find_tag(&tmpnode, n_request.tag, respbuf, resplen) < 0)
     {
         goto err;
     }
 
-    asn1drval = ber_decode(NULL, &asn_DEF_RetrieveNotificationsListResponse, (void **)&asn1resp, respbuf, resplen);
-    free(respbuf);
-    respbuf = NULL;
-
-    if (asn1drval.code != RC_OK)
+    if (euicc_derutil_unpack_find_tag(&n_notificationMetadataList, 0xA0, tmpnode.value, tmpnode.length) < 0)
     {
         goto err;
     }
 
-    if (asn1resp->present != RetrieveNotificationsListResponse_PR_notificationList)
-    {
-        goto err;
-    }
+    n_NotificationMetadata.self.ptr = n_notificationMetadataList.value;
+    n_NotificationMetadata.self.length = 0;
 
-    if (asn1resp->choice.notificationList.list.count < 1)
+    while (euicc_derutil_unpack_next(&n_NotificationMetadata, &n_NotificationMetadata, n_notificationMetadataList.value, n_notificationMetadataList.length) == 0)
     {
-        goto err;
-    }
+        struct es10b_notification_metadata_list *p;
 
-    asn1notification = asn1resp->choice.notificationList.list.array[0];
+        if (n_NotificationMetadata.tag != 0xBF2F)
+        {
+            continue;
+        }
 
-    switch (asn1notification->present)
-    {
-    case PendingNotification_PR_profileInstallationResult:
-        asn1metadata = &asn1notification->choice.profileInstallationResult.profileInstallationResultData.notificationMetadata;
-        break;
-    case PendingNotification_PR_otherSignedNotification:
-        asn1metadata = &asn1notification->choice.otherSignedNotification.tbsOtherNotification;
-        break;
-    default:
-        goto err;
-    }
+        p = malloc(sizeof(struct es10b_notification_metadata_list));
+        if (!p)
+        {
+            goto err;
+        }
 
-    *receiver = malloc(asn1metadata->notificationAddress.size + 1);
-    memset(*receiver, 0, asn1metadata->notificationAddress.size + 1);
-    if (!(*receiver))
-    {
-        goto err;
-    }
-    memcpy(*receiver, asn1metadata->notificationAddress.buf, asn1metadata->notificationAddress.size);
+        memset(p, 0, sizeof(*p));
 
-    asn1erval = der_encode(&asn_DEF_PendingNotification, asn1notification, NULL, NULL);
-    if (asn1erval.encoded == -1)
-    {
-        goto err;
-    }
+        tmpnode.self.ptr = n_NotificationMetadata.value;
+        tmpnode.self.length = 0;
+        p->profileManagementOperation = ES10B_PROFILE_MANAGEMENT_OPERATION_NULL;
+        while (euicc_derutil_unpack_next(&tmpnode, &tmpnode, n_NotificationMetadata.value, n_NotificationMetadata.length) == 0)
+        {
+            switch (tmpnode.tag)
+            {
+            case 0x80:
+                p->seqNumber = euicc_derutil_convert_bin2long(tmpnode.value, tmpnode.length);
+                break;
+            case 0x81:
+                if (tmpnode.length >= 2)
+                {
+                    switch (tmpnode.value[1])
+                    {
+                    case ES10B_PROFILE_MANAGEMENT_OPERATION_INSTALL:
+                    case ES10B_PROFILE_MANAGEMENT_OPERATION_ENABLE:
+                    case ES10B_PROFILE_MANAGEMENT_OPERATION_DISABLE:
+                    case ES10B_PROFILE_MANAGEMENT_OPERATION_DELETE:
+                        p->profileManagementOperation = tmpnode.value[1];
+                        break;
+                    default:
+                        p->profileManagementOperation = ES10B_PROFILE_MANAGEMENT_OPERATION_UNDEFINED;
+                        break;
+                    }
+                }
+                break;
+            case 0x0C:
+                p->notificationAddress = malloc(tmpnode.length + 1);
+                if (p->notificationAddress)
+                {
+                    memcpy(p->notificationAddress, tmpnode.value, tmpnode.length);
+                    p->notificationAddress[tmpnode.length] = '\0';
+                }
+                break;
+            case 0x5A:
+                p->iccid = malloc((tmpnode.length * 2) + 1);
+                if (p->iccid)
+                {
+                    if (euicc_hexutil_bin2gsmbcd(p->iccid, (tmpnode.length * 2) + 1, tmpnode.value, tmpnode.length) < 0)
+                    {
+                        free(p->iccid);
+                        p->iccid = NULL;
+                    }
+                }
+                break;
+            }
+        }
 
-    payload_length = asn1erval.encoded;
-    payload = malloc(payload_length);
-    if (!payload)
-    {
-        goto err;
-    }
+        if (*notificationMetadataList == NULL)
+        {
+            *notificationMetadataList = p;
+        }
+        else
+        {
+            list_wptr->next = p;
+        }
 
-    asn1erval = der_encode_to_buffer(&asn_DEF_PendingNotification, asn1notification, payload, payload_length);
-    if (asn1erval.encoded == -1)
-    {
-        goto err;
-    }
-
-    *b64_payload = malloc(euicc_base64_encode_len(payload_length));
-    if (!(*b64_payload))
-    {
-        goto err;
-    }
-    if (euicc_base64_encode(*b64_payload, payload, payload_length) < 0)
-    {
-        goto err;
+        list_wptr = p;
     }
 
     goto exit;
 
 err:
     fret = -1;
-    free(*b64_payload);
-    *b64_payload = NULL;
-    free(*receiver);
-    *receiver = NULL;
+    es10b_notification_metadata_list_free_all(*notificationMetadataList);
 exit:
-    free(payload);
     free(respbuf);
-    ASN_STRUCT_FREE(asn_DEF_RetrieveNotificationsListRequest, asn1req);
-    ASN_STRUCT_FREE(asn_DEF_RetrieveNotificationsListResponse, asn1resp);
+    respbuf = NULL;
+    return fret;
+}
 
+int es10b_retrieve_notifications_list(struct euicc_ctx *ctx, struct es10b_pending_notification *PendingNotification, unsigned long seqNumber)
+{
+    int fret = 0;
+    uint8_t seqNumber_buf[sizeof(seqNumber)];
+    uint32_t seqNumber_buf_len = sizeof(seqNumber_buf);
+    struct euicc_derutil_node n_request;
+    uint32_t reqlen;
+    uint8_t *respbuf = NULL;
+    unsigned resplen;
+
+    struct euicc_derutil_node tmpnode, n_PendingNotification, n_NotificationMetadata;
+
+    memset(PendingNotification, 0, sizeof(struct es10b_pending_notification));
+
+    if (euicc_derutil_convert_long2bin(seqNumber_buf, &seqNumber_buf_len, seqNumber) < 0)
+    {
+        goto err;
+    }
+
+    n_request = (struct euicc_derutil_node){
+        .tag = 0xBF2B, // RetrieveNotificationsListRequest
+        .pack = {
+            .child = &(struct euicc_derutil_node){
+                .tag = 0xA0, // searchCriteria
+                .pack = {
+                    .child = &(struct euicc_derutil_node){
+                        .tag = 0x80, // seqNumber
+                        .length = seqNumber_buf_len,
+                        .value = seqNumber_buf,
+                    },
+                },
+            },
+        },
+    };
+
+    reqlen = sizeof(ctx->apdu._internal.request_buffer.body);
+    if (euicc_derutil_pack(ctx->apdu._internal.request_buffer.body, &reqlen, &n_request))
+    {
+        goto err;
+    }
+
+    if (es10x_command(ctx, &respbuf, &resplen, ctx->apdu._internal.request_buffer.body, reqlen) < 0)
+    {
+        goto err;
+    }
+
+    if (euicc_derutil_unpack_find_tag(&tmpnode, n_request.tag, respbuf, resplen) < 0)
+    {
+        goto err;
+    }
+
+    if (euicc_derutil_unpack_find_tag(&tmpnode, 0xA0, tmpnode.value, tmpnode.length) < 0)
+    {
+        goto err;
+    }
+
+    if (euicc_derutil_unpack_find_alias_tags(&n_PendingNotification, (uint16_t[]){0xBF37, 0x30}, 2, tmpnode.value, tmpnode.length) < 0)
+    {
+        goto err;
+    }
+
+    switch (n_PendingNotification.tag)
+    {
+    case 0xBF37: // profileInstallationResult
+        if (euicc_derutil_unpack_find_tag(&tmpnode, 0xBF27, n_PendingNotification.value, n_PendingNotification.length) < 0)
+        {
+            goto err;
+        }
+        if (euicc_derutil_unpack_find_tag(&n_NotificationMetadata, 0xBF2F, tmpnode.value, tmpnode.length) < 0)
+        {
+            goto err;
+        }
+        break;
+    case 0x30: // otherSignedNotification
+        if (euicc_derutil_unpack_find_tag(&n_NotificationMetadata, 0xBF2F, n_PendingNotification.value, n_PendingNotification.length) < 0)
+        {
+            goto err;
+        }
+        break;
+    }
+
+    if (euicc_derutil_unpack_find_tag(&tmpnode, 0x0C, n_NotificationMetadata.value, n_NotificationMetadata.length) < 0)
+    {
+        goto err;
+    }
+
+    PendingNotification->notificationAddress = malloc(tmpnode.length + 1);
+    if (!PendingNotification->notificationAddress)
+    {
+        goto err;
+    }
+    memcpy(PendingNotification->notificationAddress, tmpnode.value, tmpnode.length);
+    PendingNotification->notificationAddress[tmpnode.length] = '\0';
+
+    PendingNotification->b64_PendingNotification = malloc(euicc_base64_encode_len(n_PendingNotification.self.length));
+    if (!PendingNotification->b64_PendingNotification)
+    {
+        goto err;
+    }
+    if (euicc_base64_encode(PendingNotification->b64_PendingNotification, n_PendingNotification.self.ptr, n_PendingNotification.self.length) < 0)
+    {
+        goto err;
+    }
+
+    fret = 0;
+
+    goto exit;
+
+err:
+    fret = -1;
+    es10b_pending_notification_free(PendingNotification);
+exit:
+    free(respbuf);
+    respbuf = NULL;
     return fret;
 }
 
 int es10b_remove_notification_from_list(struct euicc_ctx *ctx, unsigned long seqNumber)
 {
     int fret = 0;
+    uint8_t seqNumber_buf[sizeof(seqNumber)];
+    uint32_t seqNumber_buf_len = sizeof(seqNumber_buf);
+    struct euicc_derutil_node n_request;
+    uint32_t reqlen;
     uint8_t *respbuf = NULL;
     unsigned resplen;
-    asn_enc_rval_t asn1erval;
-    asn_dec_rval_t asn1drval;
-    NotificationSentRequest_t *asn1req = NULL;
-    NotificationSentResponse_t *asn1resp = NULL;
-    long eresult;
 
-    asn1req = malloc(sizeof(NotificationSentRequest_t));
-    if (!asn1req)
-    {
-        goto err;
-    }
-    memset(asn1req, 0, sizeof(*asn1req));
+    struct euicc_derutil_node tmpnode;
 
-    if (asn_ulong2INTEGER(&asn1req->seqNumber, seqNumber) < 0)
+    if (euicc_derutil_convert_long2bin(seqNumber_buf, &seqNumber_buf_len, seqNumber) < 0)
     {
         goto err;
     }
 
-    asn1erval = der_encode_to_buffer(&asn_DEF_NotificationSentRequest, asn1req, ctx->g_asn1_der_request_buf, sizeof(ctx->g_asn1_der_request_buf));
-    ASN_STRUCT_FREE(asn_DEF_NotificationSentRequest, asn1req);
-    asn1req = NULL;
-    if (asn1erval.encoded == -1)
+    n_request = (struct euicc_derutil_node){
+        .tag = 0xBF30, // NotificationSentRequest
+        .pack = {
+            .child = &(struct euicc_derutil_node){
+                .tag = 0x80, // seqNumber
+                .length = seqNumber_buf_len,
+                .value = seqNumber_buf,
+            },
+        },
+    };
+
+    reqlen = sizeof(ctx->apdu._internal.request_buffer.body);
+    if (euicc_derutil_pack(ctx->apdu._internal.request_buffer.body, &reqlen, &n_request))
     {
         goto err;
     }
 
-    if (es10x_command(ctx, &respbuf, &resplen, ctx->g_asn1_der_request_buf, asn1erval.encoded) < 0)
+    if (es10x_command(ctx, &respbuf, &resplen, ctx->apdu._internal.request_buffer.body, reqlen) < 0)
     {
         goto err;
     }
 
-    asn1drval = ber_decode(NULL, &asn_DEF_NotificationSentResponse, (void **)&asn1resp, respbuf, resplen);
+    if (euicc_derutil_unpack_find_tag(&tmpnode, n_request.tag, respbuf, resplen) < 0)
+    {
+        goto err;
+    }
+
+    if (euicc_derutil_unpack_find_tag(&tmpnode, 0x80, tmpnode.value, tmpnode.length) < 0)
+    {
+        goto err;
+    }
+
+    fret = euicc_derutil_convert_bin2long(tmpnode.value, tmpnode.length);
+
+    goto exit;
+
+err:
+    fret = -1;
+exit:
     free(respbuf);
     respbuf = NULL;
-
-    if (asn1drval.code != RC_OK)
-    {
-        goto err;
-    }
-
-    if (asn_INTEGER2long(&asn1resp->deleteNotificationStatus, &eresult) < 0)
-    {
-        goto err;
-    }
-
-    fret = eresult;
-    goto exit;
-
-err:
-    fret = -1;
-exit:
-    ASN_STRUCT_FREE(asn_DEF_NotificationSentRequest, asn1req);
-    ASN_STRUCT_FREE(asn_DEF_NotificationSentResponse, asn1resp);
     return fret;
 }
 
-int es10b_authenticate_server(struct euicc_ctx *ctx, char **b64_response, struct es10b_authenticate_server_param *param)
+void es10b_notification_metadata_list_free_all(struct es10b_notification_metadata_list *notificationMetadataList)
 {
-    int fret = 0;
-    uint8_t binimei[8];
-    uint8_t binimei_len;
-    uint8_t *reqbuf = NULL, *reqwptr = NULL;
-    unsigned reqlen;
-    uint8_t *respbuf = NULL;
-    unsigned resplen;
-    asn_enc_rval_t asn1erval;
-    CtxParams1_t *ctx_params1;
-
-    *b64_response = NULL;
-
-    ctx_params1 = malloc(sizeof(CtxParams1_t));
-    if (!ctx_params1)
+    while (notificationMetadataList)
     {
-        goto err;
+        struct es10b_notification_metadata_list *next = notificationMetadataList->next;
+        free(notificationMetadataList->notificationAddress);
+        free(notificationMetadataList->iccid);
+        free(notificationMetadataList);
+        notificationMetadataList = next;
     }
-    memset(ctx_params1, 0, sizeof(*ctx_params1));
-
-    ctx_params1->present = CtxParams1_PR_ctxParamsForCommonAuthentication;
-    if (param->matchingId)
-    {
-        ctx_params1->choice.ctxParamsForCommonAuthentication.matchingId = malloc(sizeof(UTF8String_t));
-        if (!ctx_params1->choice.ctxParamsForCommonAuthentication.matchingId)
-        {
-            goto err;
-        }
-        memset(ctx_params1->choice.ctxParamsForCommonAuthentication.matchingId, 0, sizeof(UTF8String_t));
-        if (OCTET_STRING_fromString(ctx_params1->choice.ctxParamsForCommonAuthentication.matchingId, param->matchingId) < 0)
-        {
-            goto err;
-        }
-    }
-    if (param->imei)
-    {
-        if ((binimei_len = euicc_hexutil_gsmbcd2bin(binimei, sizeof(binimei), param->imei)) < 0)
-        {
-            goto err;
-        }
-        ctx_params1->choice.ctxParamsForCommonAuthentication.deviceInfo.imei = malloc(sizeof(Octet8_t));
-        if (!ctx_params1->choice.ctxParamsForCommonAuthentication.deviceInfo.imei)
-        {
-            goto err;
-        }
-        memset(ctx_params1->choice.ctxParamsForCommonAuthentication.deviceInfo.imei, 0, sizeof(Octet8_t));
-        if (OCTET_STRING_fromBuf(ctx_params1->choice.ctxParamsForCommonAuthentication.deviceInfo.imei, (const char *)binimei, binimei_len) < 0)
-        {
-            goto err;
-        }
-        param->tac = binimei;
-    }
-
-    if (!param->tac)
-    {
-        param->tac = "\x35\x29\x06\x11";
-    }
-    if (OCTET_STRING_fromBuf(&ctx_params1->choice.ctxParamsForCommonAuthentication.deviceInfo.tac, (const char *)param->tac, 4) < 0)
-    {
-        goto err;
-    }
-
-    asn1erval = der_encode(&asn_DEF_CtxParams1, ctx_params1, NULL, NULL);
-
-    reqlen = 0;
-    reqlen += 7; // AuthenticateServerRequest Tag + Length (MAX)
-    reqlen += euicc_base64_decode_len(param->b64_server_signed_1);
-    reqlen += euicc_base64_decode_len(param->b64_server_signature_1);
-    reqlen += euicc_base64_decode_len(param->b64_euicc_ci_pkid_to_be_used);
-    reqlen += euicc_base64_decode_len(param->b64_server_certificate);
-    reqlen += asn1erval.encoded;
-
-    reqbuf = malloc(reqlen);
-    if (!reqbuf)
-    {
-        goto err;
-    }
-    memset(reqbuf, 0, reqlen);
-
-    reqwptr = reqbuf;
-    reqwptr += 7; // Skip Tag + Length
-    reqwptr += euicc_base64_decode(reqwptr, param->b64_server_signed_1);
-    reqwptr += euicc_base64_decode(reqwptr, param->b64_server_signature_1);
-    reqwptr += euicc_base64_decode(reqwptr, param->b64_euicc_ci_pkid_to_be_used);
-    reqwptr += euicc_base64_decode(reqwptr, param->b64_server_certificate);
-    asn1erval = der_encode_to_buffer(&asn_DEF_CtxParams1, ctx_params1, reqwptr, asn1erval.encoded);
-    if (asn1erval.encoded == -1)
-    {
-        goto err;
-    }
-    ASN_STRUCT_FREE(asn_DEF_CtxParams1, ctx_params1);
-    ctx_params1 = NULL;
-    reqlen = reqwptr - reqbuf + asn1erval.encoded; // re-calculated length, for not accounting base64_decode_len
-
-    reqwptr = euicc_derutil_tag_leftpad(reqbuf, reqlen, 7, 0xBF38);
-    reqlen = reqlen - (reqwptr - reqbuf); // re-calculated length, for add tag and length
-
-    if (es10x_command(ctx, &respbuf, &resplen, reqwptr, reqlen) < 0)
-    {
-        goto err;
-    }
-    free(reqbuf);
-    reqbuf = NULL;
-
-    *b64_response = malloc(euicc_base64_encode_len(resplen));
-    if (!(*b64_response))
-    {
-        goto err;
-    }
-    euicc_base64_encode(*b64_response, respbuf, resplen);
-
-    goto exit;
-
-err:
-    fret = -1;
-    free(reqbuf);
-exit:
-    ASN_STRUCT_FREE(asn_DEF_CtxParams1, ctx_params1);
-    return fret;
 }
 
-void es10b_notification_metadata_free_all(struct es10b_notification_metadata *metadatas, int count)
+void es10b_pending_notification_free(struct es10b_pending_notification *PendingNotification)
 {
-    if (!metadatas)
-    {
-        return;
-    }
-    for (int i = 0; i < count; i++)
-    {
-        free(metadatas[i].profileManagementOperation);
-        free(metadatas[i].notificationAddress);
-        free(metadatas[i].iccid);
-    }
-    free(metadatas);
-}
-
-void es10b_notification_metadata_print(struct es10b_notification_metadata *n)
-{
-    printf("\tseqNumber: %ld\n", n->seqNumber);
-    printf("\tprofileManagementOperation: %s\n", n->profileManagementOperation);
-    printf("\tnotificationAddress: %s\n", n->notificationAddress ? n->notificationAddress : "(null)");
-    printf("\ticcid: %s\n", n->iccid ? n->iccid : "(null)");
+    free(PendingNotification->notificationAddress);
+    free(PendingNotification->b64_PendingNotification);
+    memset(PendingNotification, 0, sizeof(struct es10b_pending_notification));
 }

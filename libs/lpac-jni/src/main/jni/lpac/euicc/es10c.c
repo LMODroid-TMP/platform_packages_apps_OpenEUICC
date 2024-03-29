@@ -1,6 +1,7 @@
+#include "euicc.private.h"
 #include "es10c.h"
-#include "es10x.private.h"
 
+#include "derutil.h"
 #include "hexutil.h"
 #include "base64.h"
 
@@ -10,937 +11,502 @@
 #include <unistd.h>
 #include <string.h>
 
-#include "asn1c/asn1/ProfileInfoListRequest.h"
-#include "asn1c/asn1/ProfileInfoListResponse.h"
-#include "asn1c/asn1/EnableProfileRequest.h"
-#include "asn1c/asn1/EnableProfileResponse.h"
-#include "asn1c/asn1/DisableProfileRequest.h"
-#include "asn1c/asn1/DisableProfileResponse.h"
-#include "asn1c/asn1/DeleteProfileRequest.h"
-#include "asn1c/asn1/DeleteProfileResponse.h"
-#include "asn1c/asn1/EuiccMemoryResetRequest.h"
-#include "asn1c/asn1/EuiccMemoryResetResponse.h"
-#include "asn1c/asn1/GetEuiccDataRequest.h"
-#include "asn1c/asn1/GetEuiccDataResponse.h"
-#include "asn1c/asn1/SetNicknameRequest.h"
-#include "asn1c/asn1/SetNicknameResponse.h"
-
-int es10c_get_profiles_info(struct euicc_ctx *ctx, struct es10c_profile_info **profiles, int *profiles_count)
+int es10c_get_profiles_info(struct euicc_ctx *ctx, struct es10c_profile_info_list **profileInfoList)
 {
     int fret = 0;
+    struct euicc_derutil_node n_request = {
+        .tag = 0xBF2D, // ProfileInfoListRequest
+    };
+    uint32_t reqlen;
     uint8_t *respbuf = NULL;
     unsigned resplen;
-    asn_enc_rval_t asn1erval;
-    asn_dec_rval_t asn1drval;
-    ProfileInfoListRequest_t *asn1req = NULL;
-    ProfileInfoListResponse_t *asn1resp = NULL;
 
-    *profiles = NULL;
-    *profiles_count = 0;
+    struct euicc_derutil_node tmpnode, n_profileInfoListOk, n_ProfileInfo;
 
-    asn1req = malloc(sizeof(ProfileInfoListRequest_t));
-    if (!asn1req)
-    {
-        goto err;
-    }
-    memset(asn1req, 0, sizeof(*asn1req));
+    struct es10c_profile_info_list *list_wptr = NULL;
 
-    asn1erval = der_encode_to_buffer(&asn_DEF_ProfileInfoListRequest, asn1req, ctx->g_asn1_der_request_buf, sizeof(ctx->g_asn1_der_request_buf));
-    ASN_STRUCT_FREE(asn_DEF_ProfileInfoListRequest, asn1req);
-    asn1req = NULL;
-    if (asn1erval.encoded == -1)
+    int tmpint;
+
+    *profileInfoList = NULL;
+
+    reqlen = sizeof(ctx->apdu._internal.request_buffer.body);
+    if (euicc_derutil_pack(ctx->apdu._internal.request_buffer.body, &reqlen, &n_request))
     {
         goto err;
     }
 
-    if (es10x_command(ctx, &respbuf, &resplen, ctx->g_asn1_der_request_buf, asn1erval.encoded) < 0)
+    if (es10x_command(ctx, &respbuf, &resplen, ctx->apdu._internal.request_buffer.body, reqlen) < 0)
     {
         goto err;
     }
 
-    asn1drval = ber_decode(NULL, &asn_DEF_ProfileInfoListResponse, (void **)&asn1resp, respbuf, resplen);
-    free(respbuf);
-    respbuf = NULL;
-
-    if (asn1drval.code != RC_OK)
+    if (euicc_derutil_unpack_find_tag(&tmpnode, n_request.tag, respbuf, resplen) < 0)
     {
         goto err;
     }
 
-    if (asn1resp->present != ProfileInfoListResponse_PR_profileInfoListOk)
+    if (euicc_derutil_unpack_find_tag(&n_profileInfoListOk, 0xA0, tmpnode.value, tmpnode.length) < 0)
     {
         goto err;
     }
 
-    *profiles_count = asn1resp->choice.profileInfoListOk.list.count;
-    *profiles = malloc(sizeof(struct es10c_profile_info) * (*profiles_count));
-    if (!(*profiles))
+    n_ProfileInfo.self.ptr = n_profileInfoListOk.value;
+    n_ProfileInfo.self.length = 0;
+
+    while (euicc_derutil_unpack_next(&n_ProfileInfo, &n_ProfileInfo, n_profileInfoListOk.value, n_profileInfoListOk.length) == 0)
     {
-        goto err;
-    }
-    memset(*profiles, 0, sizeof(struct es10c_profile_info) * (*profiles_count));
+        struct es10c_profile_info_list *p;
 
-    for (int i = 0; i < *profiles_count; i++)
-    {
-        struct es10c_profile_info *p = &((*profiles)[i]);
-        struct ProfileInfo *asn1p = asn1resp->choice.profileInfoListOk.list.array[i];
-
-        if (asn1p->iccid)
+        if (n_ProfileInfo.tag != 0xE3)
         {
-            if (euicc_hexutil_bin2gsmbcd(p->iccid, sizeof(p->iccid), asn1p->iccid->buf, asn1p->iccid->size))
+            continue;
+        }
+
+        p = malloc(sizeof(struct es10c_profile_info_list));
+        if (!p)
+        {
+            goto err;
+        }
+
+        memset(p, 0, sizeof(*p));
+
+        tmpnode.self.ptr = n_ProfileInfo.value;
+        tmpnode.self.length = 0;
+
+        p->profileState = ES10C_PROFILE_STATE_NULL;
+        p->profileClass = ES10C_PROFILE_CLASS_NULL;
+        p->iconType = ES10C_ICON_TYPE_NULL;
+
+        while (euicc_derutil_unpack_next(&tmpnode, &tmpnode, n_ProfileInfo.value, n_ProfileInfo.length) == 0)
+        {
+            switch (tmpnode.tag)
             {
-                memset(p->iccid, 0, sizeof(p->iccid));
-                continue;
+            case 0x5A:
+                euicc_hexutil_bin2gsmbcd(p->iccid, sizeof(p->iccid), tmpnode.value, tmpnode.length);
+                break;
+            case 0x4F:
+                euicc_hexutil_bin2hex(p->isdpAid, sizeof(p->isdpAid), tmpnode.value, tmpnode.length);
+                break;
+            case 0x9F70:
+                tmpint = euicc_derutil_convert_bin2long(tmpnode.value, tmpnode.length);
+                switch (tmpint)
+                {
+                case ES10C_PROFILE_STATE_DISABLED:
+                case ES10C_PROFILE_STATE_ENABLED:
+                    p->profileState = tmpint;
+                    break;
+                default:
+                    p->profileState = ES10C_PROFILE_STATE_UNDEFINED;
+                    break;
+                }
+                break;
+            case 0x90:
+                p->profileNickname = malloc(tmpnode.length + 1);
+                if (p->profileNickname)
+                {
+                    memcpy(p->profileNickname, tmpnode.value, tmpnode.length);
+                    p->profileNickname[tmpnode.length] = '\0';
+                }
+                break;
+            case 0x91:
+                p->serviceProviderName = malloc(tmpnode.length + 1);
+                if (p->serviceProviderName)
+                {
+                    memcpy(p->serviceProviderName, tmpnode.value, tmpnode.length);
+                    p->serviceProviderName[tmpnode.length] = '\0';
+                }
+                break;
+            case 0x92:
+                p->profileName = malloc(tmpnode.length + 1);
+                if (p->profileName)
+                {
+                    memcpy(p->profileName, tmpnode.value, tmpnode.length);
+                    p->profileName[tmpnode.length] = '\0';
+                }
+                break;
+            case 0x93:
+                tmpint = euicc_derutil_convert_bin2long(tmpnode.value, tmpnode.length);
+                switch (tmpint)
+                {
+                case ES10C_ICON_TYPE_JPEG:
+                case ES10C_ICON_TYPE_PNG:
+                    p->iconType = tmpint;
+                    break;
+                default:
+                    p->iconType = ES10C_ICON_TYPE_UNDEFINED;
+                    break;
+                }
+                break;
+            case 0x94:
+                p->icon = malloc(euicc_base64_encode_len(tmpnode.length));
+                if (p->icon)
+                {
+                    euicc_base64_encode(p->icon, tmpnode.value, tmpnode.length);
+                }
+                break;
+            case 0x95:
+                tmpint = euicc_derutil_convert_bin2long(tmpnode.value, tmpnode.length);
+                switch (tmpint)
+                {
+                case ES10C_PROFILE_CLASS_TEST:
+                case ES10C_PROFILE_CLASS_PROVISIONING:
+                case ES10C_PROFILE_CLASS_OPERATIONAL:
+                    p->profileClass = tmpint;
+                    break;
+                default:
+                    p->profileClass = ES10C_PROFILE_CLASS_UNDEFINED;
+                    break;
+                }
+                break;
+            case 0xB6:
+            case 0xB7:
+            case 0xB8:
+            case 0x99:
+                fprintf(stderr, "\n[PLEASE REPORT][TODO][TAG %02X]: ", tmpnode.tag);
+                for (uint32_t i = 0; i < tmpnode.self.length; i++)
+                {
+                    fprintf(stderr, "%02X ", tmpnode.self.ptr[i]);
+                }
+                fprintf(stderr, "\n");
+                break;
             }
         }
 
-        if (asn1p->isdpAid)
+        if (*profileInfoList == NULL)
         {
-            for (int j = 0; j < asn1p->isdpAid->size; j++)
-            {
-                sprintf(p->isdpAid + (j * 2), "%02X", (uint8_t)(asn1p->isdpAid->buf[j]));
-            }
-        }
-
-        if (asn1p->profileState)
-        {
-            long profileState;
-
-            asn_INTEGER2long(asn1p->profileState, &profileState);
-
-            switch (profileState)
-            {
-            case ES10C_PROFILE_INFO_STATE_DISABLED:
-                p->profileState = strdup("disabled");
-                break;
-            case ES10C_PROFILE_INFO_STATE_ENABLED:
-                p->profileState = strdup("enabled");
-                break;
-            default:
-                p->profileState = strdup("unknown");
-                break;
-            }
-        }
-
-        if (asn1p->profileClass)
-        {
-            long profileClass;
-
-            asn_INTEGER2long(asn1p->profileClass, &profileClass);
-
-            switch (profileClass)
-            {
-            case ES10C_PROFILE_INFO_CLASS_TEST:
-                p->profileClass = strdup("test");
-                break;
-            case ES10C_PROFILE_INFO_CLASS_PROVISIONING:
-                p->profileClass = strdup("provisioning");
-                break;
-            case ES10C_PROFILE_INFO_CLASS_OPERATIONAL:
-                p->profileClass = strdup("operational");
-                break;
-            default:
-                p->profileClass = strdup("unknown");
-                break;
-            }
-        }
-
-        if (asn1p->profileNickname)
-        {
-            p->profileNickname = malloc(asn1p->profileNickname->size + 1);
-            if (p->profileNickname)
-            {
-                memcpy(p->profileNickname, asn1p->profileNickname->buf, asn1p->profileNickname->size);
-                p->profileNickname[asn1p->profileNickname->size] = '\0';
-            }
-        }
-
-        if (asn1p->serviceProviderName)
-        {
-            p->serviceProviderName = malloc(asn1p->serviceProviderName->size + 1);
-            if (p->serviceProviderName)
-            {
-                memcpy(p->serviceProviderName, asn1p->serviceProviderName->buf, asn1p->serviceProviderName->size);
-                p->serviceProviderName[asn1p->serviceProviderName->size] = '\0';
-            }
-        }
-
-        if (asn1p->profileName)
-        {
-            p->profileName = malloc(asn1p->profileName->size + 1);
-            if (p->profileName)
-            {
-                memcpy(p->profileName, asn1p->profileName->buf, asn1p->profileName->size);
-                p->profileName[asn1p->profileName->size] = '\0';
-            }
-        }
-
-        if (asn1p->iconType)
-        {
-            long iconType;
-
-            asn_INTEGER2long(asn1p->iconType, &iconType);
-
-            switch (iconType)
-            {
-            case ES10C_ICON_TYPE_JPEG:
-                p->iconType = strdup("jpeg");
-                break;
-            case ES10C_ICON_TYPE_PNG:
-                p->iconType = strdup("png");
-                break;
-            default:
-                p->iconType = strdup("unknown");
-                break;
-            }
+            *profileInfoList = p;
         }
         else
         {
-            p->iconType = strdup("none");
+            list_wptr->next = p;
         }
 
-        if (asn1p->icon)
-        {
-            p->icon = malloc(euicc_base64_encode_len(asn1p->icon->size));
-            if (p->icon)
-            {
-                euicc_base64_encode(p->icon, asn1p->icon->buf, asn1p->icon->size);
-            }
-        }
+        list_wptr = p;
     }
 
     goto exit;
 
 err:
     fret = -1;
-    free(*profiles);
-    *profiles = NULL;
-    *profiles_count = 0;
+    es10c_profile_info_list_free_all(*profileInfoList);
 exit:
     free(respbuf);
-    ASN_STRUCT_FREE(asn_DEF_ProfileInfoListRequest, asn1req);
-    ASN_STRUCT_FREE(asn_DEF_ProfileInfoListResponse, asn1resp);
-
+    respbuf = NULL;
     return fret;
 }
 
-static int iter_EnableProfileResponse(struct apdu_response *response, void *userdata)
-{
-    long *eresult = (long *)userdata;
-    int fret = 0;
-    asn_dec_rval_t asn1drval;
-    EnableProfileResponse_t *asn1resp = NULL;
-
-    asn1drval = ber_decode(NULL, &asn_DEF_EnableProfileResponse, (void **)&asn1resp, response->data, response->length);
-    if (asn1drval.code != RC_OK)
-    {
-        goto err;
-    }
-
-    asn_INTEGER2long(&asn1resp->enableResult, eresult);
-    goto exit;
-
-err:
-    fret = -1;
-exit:
-    if (asn1resp)
-    {
-        ASN_STRUCT_FREE(asn_DEF_EnableProfileResponse, asn1resp);
-    }
-    return fret;
-}
-
-int es10c_enable_profile_aid(struct euicc_ctx *ctx, const char *aid, int refreshflag)
+static int es10c_enable_disable_delete_profile(struct euicc_ctx *ctx, uint16_t op_tag, const char *str_id, uint8_t refreshFlag)
 {
     int fret = 0;
-    int ret;
-    asn_enc_rval_t asn1erval;
-    EnableProfileRequest_t *asn1req = NULL;
-    uint8_t asn1aid[16];
-    unsigned long eresult;
+    uint8_t id[16];
+    int id_len;
+    struct euicc_derutil_node n_request, n_choicer, n_profileIdentifierChoice, n_refreshFlag;
+    uint32_t reqlen;
+    uint8_t *respbuf = NULL;
+    unsigned resplen;
 
-    ret = euicc_hexutil_hex2bin(asn1aid, sizeof(asn1aid), aid);
-    if (ret < 0)
+    struct euicc_derutil_node tmpnode;
+
+    memset(&n_request, 0, sizeof(n_request));
+    memset(&n_choicer, 0, sizeof(n_choicer));
+    memset(&n_profileIdentifierChoice, 0, sizeof(n_profileIdentifierChoice));
+    memset(&n_refreshFlag, 0, sizeof(n_refreshFlag));
+
+    if (strlen(str_id) == 32)
+    {
+        if ((id_len = euicc_hexutil_hex2bin(id, sizeof(id), str_id)) < 0)
+        {
+            return -1;
+        }
+        n_profileIdentifierChoice.tag = 0x4F;
+    }
+    else
+    {
+        if ((id_len = euicc_hexutil_gsmbcd2bin(id, sizeof(id), str_id)) < 0)
+        {
+            return -1;
+        }
+        n_profileIdentifierChoice.tag = 0x5A;
+    }
+    n_profileIdentifierChoice.length = id_len;
+    n_profileIdentifierChoice.value = id;
+
+    if (refreshFlag & 0x80)
+    {
+        refreshFlag &= 0x7F;
+
+        if (refreshFlag)
+        {
+            refreshFlag = 0xFF;
+        }
+
+        n_refreshFlag.tag = 0x81;
+        n_refreshFlag.length = 1;
+        n_refreshFlag.value = &refreshFlag;
+
+        n_choicer.tag = 0xA0;
+        n_choicer.pack.child = &n_profileIdentifierChoice;
+        n_choicer.pack.next = &n_refreshFlag;
+
+        n_request.pack.child = &n_choicer;
+    }
+    else
+    {
+        n_request.pack.child = &n_profileIdentifierChoice;
+    }
+    n_request.tag = op_tag;
+
+    reqlen = sizeof(ctx->apdu._internal.request_buffer.body);
+    if (euicc_derutil_pack(ctx->apdu._internal.request_buffer.body, &reqlen, &n_request))
     {
         goto err;
     }
 
-    asn1req = malloc(sizeof(EnableProfileRequest_t));
-    if (!asn1req)
-    {
-        goto err;
-    }
-    memset(asn1req, 0, sizeof(*asn1req));
-
-    asn1req->refreshFlag = (refreshflag == 0) ? 0 : 1;
-
-    asn1req->profileIdentifier.present = EnableProfileRequest__profileIdentifier_PR_isdpAid;
-    ret = OCTET_STRING_fromBuf(&asn1req->profileIdentifier.choice.isdpAid, (const char *)asn1aid, ret);
-    if (ret < 0)
+    if (es10x_command(ctx, &respbuf, &resplen, ctx->apdu._internal.request_buffer.body, reqlen) < 0)
     {
         goto err;
     }
 
-    asn1erval = der_encode_to_buffer(&asn_DEF_EnableProfileRequest, asn1req, ctx->g_asn1_der_request_buf, sizeof(ctx->g_asn1_der_request_buf));
-    ASN_STRUCT_FREE(asn_DEF_EnableProfileRequest, asn1req);
-    asn1req = NULL;
-    if (asn1erval.encoded == -1)
+    if (euicc_derutil_unpack_find_tag(&tmpnode, n_request.tag, respbuf, resplen) < 0)
     {
         goto err;
     }
 
-    ret = es10x_command_iter(ctx, ctx->g_asn1_der_request_buf, asn1erval.encoded, iter_EnableProfileResponse, &eresult);
-    if (ret < 0)
+    if (euicc_derutil_unpack_find_tag(&tmpnode, 0x80, tmpnode.value, tmpnode.length) < 0)
     {
         goto err;
     }
 
-    fret = eresult;
-    goto exit;
-
-err:
-    fret = -1;
-exit:
-    if (asn1req)
-    {
-        ASN_STRUCT_FREE(asn_DEF_EnableProfileRequest, asn1req);
-    }
-    return fret;
-}
-
-int es10c_enable_profile_iccid(struct euicc_ctx *ctx, const char *iccid, int refreshflag)
-{
-    int fret = 0;
-    int ret;
-    asn_enc_rval_t asn1erval;
-    EnableProfileRequest_t *asn1req = NULL;
-    uint8_t asn1iccid[20];
-    unsigned long eresult;
-
-    ret = euicc_hexutil_gsmbcd2bin(asn1iccid, sizeof(asn1iccid), iccid);
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    asn1req = malloc(sizeof(EnableProfileRequest_t));
-    if (!asn1req)
-    {
-        goto err;
-    }
-    memset(asn1req, 0, sizeof(*asn1req));
-
-    asn1req->refreshFlag = (refreshflag == 0) ? 0 : 1;
-
-    asn1req->profileIdentifier.present = EnableProfileRequest__profileIdentifier_PR_iccid;
-    ret = OCTET_STRING_fromBuf(&asn1req->profileIdentifier.choice.iccid, (const char *)asn1iccid, ret);
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    asn1erval = der_encode_to_buffer(&asn_DEF_EnableProfileRequest, asn1req, ctx->g_asn1_der_request_buf, sizeof(ctx->g_asn1_der_request_buf));
-    ASN_STRUCT_FREE(asn_DEF_EnableProfileRequest, asn1req);
-    asn1req = NULL;
-    if (asn1erval.encoded == -1)
-    {
-        goto err;
-    }
-
-    ret = es10x_command_iter(ctx, ctx->g_asn1_der_request_buf, asn1erval.encoded, iter_EnableProfileResponse, &eresult);
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    fret = eresult;
-    goto exit;
-
-err:
-    fret = -1;
-exit:
-    if (asn1req)
-    {
-        ASN_STRUCT_FREE(asn_DEF_EnableProfileRequest, asn1req);
-    }
-    return fret;
-}
-
-static int iter_DisableProfileResponse(struct apdu_response *response, void *userdata)
-{
-    long *eresult = (long *)userdata;
-    int fret = 0;
-    asn_dec_rval_t asn1drval;
-    DisableProfileResponse_t *asn1resp = NULL;
-
-    asn1drval = ber_decode(NULL, &asn_DEF_DisableProfileResponse, (void **)&asn1resp, response->data, response->length);
-    if (asn1drval.code != RC_OK)
-    {
-        goto err;
-    }
-
-    asn_INTEGER2long(&asn1resp->disableResult, eresult);
-    goto exit;
-
-err:
-    fret = -1;
-exit:
-    if (asn1resp)
-    {
-        ASN_STRUCT_FREE(asn_DEF_DisableProfileResponse, asn1resp);
-    }
-    return fret;
-}
-
-int es10c_disable_profile_aid(struct euicc_ctx *ctx, const char *aid, int refreshflag)
-{
-    int fret = 0;
-    int ret;
-    asn_enc_rval_t asn1erval;
-    DisableProfileRequest_t *asn1req = NULL;
-    uint8_t asn1aid[16];
-    unsigned long eresult;
-
-    ret = euicc_hexutil_hex2bin(asn1aid, sizeof(asn1aid), aid);
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    asn1req = malloc(sizeof(DisableProfileRequest_t));
-    if (!asn1req)
-    {
-        goto err;
-    }
-    memset(asn1req, 0, sizeof(*asn1req));
-
-    asn1req->refreshFlag = (refreshflag == 0) ? 0 : 1;
-
-    asn1req->profileIdentifier.present = DisableProfileRequest__profileIdentifier_PR_isdpAid;
-    ret = OCTET_STRING_fromBuf(&asn1req->profileIdentifier.choice.isdpAid, (const char *)asn1aid, ret);
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    asn1erval = der_encode_to_buffer(&asn_DEF_DisableProfileRequest, asn1req, ctx->g_asn1_der_request_buf, sizeof(ctx->g_asn1_der_request_buf));
-    ASN_STRUCT_FREE(asn_DEF_DisableProfileRequest, asn1req);
-    asn1req = NULL;
-    if (asn1erval.encoded == -1)
-    {
-        goto err;
-    }
-
-    ret = es10x_command_iter(ctx, ctx->g_asn1_der_request_buf, asn1erval.encoded, iter_DisableProfileResponse, &eresult);
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    fret = eresult;
-    goto exit;
-
-err:
-    fret = -1;
-exit:
-    if (asn1req)
-    {
-        ASN_STRUCT_FREE(asn_DEF_DisableProfileRequest, asn1req);
-    }
-    return fret;
-}
-
-int es10c_disable_profile_iccid(struct euicc_ctx *ctx, const char *iccid, int refreshflag)
-{
-    int fret = 0;
-    int ret;
-    asn_enc_rval_t asn1erval;
-    DisableProfileRequest_t *asn1req = NULL;
-    uint8_t asn1iccid[20];
-    unsigned long eresult;
-
-    ret = euicc_hexutil_gsmbcd2bin(asn1iccid, sizeof(asn1iccid), iccid);
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    asn1req = malloc(sizeof(DisableProfileRequest_t));
-    if (!asn1req)
-    {
-        goto err;
-    }
-    memset(asn1req, 0, sizeof(*asn1req));
-
-    asn1req->refreshFlag = (refreshflag == 0) ? 0 : 1;
-
-    asn1req->profileIdentifier.present = DisableProfileRequest__profileIdentifier_PR_iccid;
-    ret = OCTET_STRING_fromBuf(&asn1req->profileIdentifier.choice.iccid, (const char *)asn1iccid, ret);
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    asn1erval = der_encode_to_buffer(&asn_DEF_DisableProfileRequest, asn1req, ctx->g_asn1_der_request_buf, sizeof(ctx->g_asn1_der_request_buf));
-    ASN_STRUCT_FREE(asn_DEF_DisableProfileRequest, asn1req);
-    asn1req = NULL;
-    if (asn1erval.encoded == -1)
-    {
-        goto err;
-    }
-
-    ret = es10x_command_iter(ctx, ctx->g_asn1_der_request_buf, asn1erval.encoded, iter_DisableProfileResponse, &eresult);
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    fret = eresult;
-    goto exit;
-
-err:
-    fret = -1;
-exit:
-    if (asn1req)
-    {
-        ASN_STRUCT_FREE(asn_DEF_DisableProfileRequest, asn1req);
-    }
-    return fret;
-}
-
-static int iter_DeleteProfileResponse(struct apdu_response *response, void *userdata)
-{
-    long *eresult = (long *)userdata;
-    int fret = 0;
-    asn_dec_rval_t asn1drval;
-    DeleteProfileResponse_t *asn1resp = NULL;
-
-    asn1drval = ber_decode(NULL, &asn_DEF_DeleteProfileResponse, (void **)&asn1resp, response->data, response->length);
-    if (asn1drval.code != RC_OK)
-    {
-        goto err;
-    }
-
-    asn_INTEGER2long(&asn1resp->deleteResult, eresult);
-    goto exit;
-
-err:
-    fret = -1;
-exit:
-    if (asn1resp)
-    {
-        ASN_STRUCT_FREE(asn_DEF_DeleteProfileResponse, asn1resp);
-    }
-    return fret;
-}
-
-int es10c_delete_profile_aid(struct euicc_ctx *ctx, const char *aid)
-{
-    int fret = 0;
-    int ret;
-    asn_enc_rval_t asn1erval;
-    DeleteProfileRequest_t *asn1req = NULL;
-    uint8_t asn1aid[16];
-    unsigned long eresult;
-
-    ret = euicc_hexutil_hex2bin(asn1aid, sizeof(asn1aid), aid);
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    asn1req = malloc(sizeof(DeleteProfileRequest_t));
-    if (!asn1req)
-    {
-        goto err;
-    }
-    memset(asn1req, 0, sizeof(*asn1req));
-
-    asn1req->present = DeleteProfileRequest_PR_isdpAid;
-    ret = OCTET_STRING_fromBuf(&asn1req->choice.isdpAid, (const char *)asn1aid, ret);
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    asn1erval = der_encode_to_buffer(&asn_DEF_DeleteProfileRequest, asn1req, ctx->g_asn1_der_request_buf, sizeof(ctx->g_asn1_der_request_buf));
-    ASN_STRUCT_FREE(asn_DEF_DeleteProfileRequest, asn1req);
-    asn1req = NULL;
-    if (asn1erval.encoded == -1)
-    {
-        goto err;
-    }
-
-    ret = es10x_command_iter(ctx, ctx->g_asn1_der_request_buf, asn1erval.encoded, iter_DeleteProfileResponse, &eresult);
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    fret = eresult;
-    goto exit;
-
-err:
-    fret = -1;
-exit:
-    if (asn1req)
-    {
-        ASN_STRUCT_FREE(asn_DEF_DeleteProfileRequest, asn1req);
-    }
-    return fret;
-}
-
-int es10c_delete_profile_iccid(struct euicc_ctx *ctx, const char *iccid)
-{
-    int fret = 0;
-    int ret;
-    asn_enc_rval_t asn1erval;
-    DeleteProfileRequest_t *asn1req = NULL;
-    uint8_t asn1iccid[20];
-    unsigned long eresult;
-
-    ret = euicc_hexutil_gsmbcd2bin(asn1iccid, sizeof(asn1iccid), iccid);
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    asn1req = malloc(sizeof(DeleteProfileRequest_t));
-    if (!asn1req)
-    {
-        goto err;
-    }
-    memset(asn1req, 0, sizeof(*asn1req));
-
-    asn1req->present = DeleteProfileRequest_PR_iccid;
-    ret = OCTET_STRING_fromBuf(&asn1req->choice.iccid, (const char *)asn1iccid, ret);
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    asn1erval = der_encode_to_buffer(&asn_DEF_DeleteProfileRequest, asn1req, ctx->g_asn1_der_request_buf, sizeof(ctx->g_asn1_der_request_buf));
-    ASN_STRUCT_FREE(asn_DEF_DeleteProfileRequest, asn1req);
-    asn1req = NULL;
-    if (asn1erval.encoded == -1)
-    {
-        goto err;
-    }
-
-    ret = es10x_command_iter(ctx, ctx->g_asn1_der_request_buf, asn1erval.encoded, iter_DeleteProfileResponse, &eresult);
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    fret = eresult;
-    goto exit;
-
-err:
-    fret = -1;
-exit:
-    if (asn1req)
-    {
-        ASN_STRUCT_FREE(asn_DEF_DeleteProfileRequest, asn1req);
-    }
-    return fret;
-}
-
-static int iter_EuiccMemoryResetResponse(struct apdu_response *response, void *userdata)
-{
-    long *eresult = (long *)userdata;
-    int fret = 0;
-    asn_dec_rval_t asn1drval;
-    EuiccMemoryResetResponse_t *asn1resp = NULL;
-
-    asn1drval = ber_decode(NULL, &asn_DEF_EuiccMemoryResetResponse, (void **)&asn1resp, response->data, response->length);
-    if (asn1drval.code != RC_OK)
-    {
-        goto err;
-    }
-
-    asn_INTEGER2long(&asn1resp->resetResult, eresult);
-    goto exit;
-
-err:
-    fret = -1;
-exit:
-    if (asn1resp)
-    {
-        ASN_STRUCT_FREE(asn_DEF_EuiccMemoryResetResponse, asn1resp);
-    }
-    return fret;
-}
-
-int es10c_euicc_memory_reset(struct euicc_ctx *ctx, int op, int tp, int addr)
-{
-    int fret = 0;
-    int ret;
-    asn_enc_rval_t asn1erval;
-    EuiccMemoryResetRequest_t *asn1req = NULL;
-    unsigned long eresult;
-
-    asn1req = malloc(sizeof(EuiccMemoryResetRequest_t));
-    if (!asn1req)
-    {
-        goto err;
-    }
-    memset(asn1req, 0, sizeof(*asn1req));
-
-    asn1req->resetOptions.bits_unused = 5;
-    asn1req->resetOptions.size = 1;
-    asn1req->resetOptions.buf = malloc(asn1req->resetOptions.size);
-    if (!asn1req->resetOptions.buf)
-    {
-        goto err;
-    }
-
-    asn1req->resetOptions.buf[0] = 0;
-
-    if (op)
-    {
-        asn1req->resetOptions.buf[0] |= 1 << (7 - EuiccMemoryResetRequest__resetOptions_deleteOperationalProfiles);
-    }
-
-    if (tp)
-    {
-        asn1req->resetOptions.buf[0] |= 1 << (7 - EuiccMemoryResetRequest__resetOptions_deleteFieldLoadedTestProfiles);
-    }
-
-    if (addr)
-    {
-        asn1req->resetOptions.buf[0] |= 1 << (7 - EuiccMemoryResetRequest__resetOptions_resetDefaultSmdpAddress);
-    }
-
-    asn1erval = der_encode_to_buffer(&asn_DEF_EuiccMemoryResetRequest, asn1req, ctx->g_asn1_der_request_buf, sizeof(ctx->g_asn1_der_request_buf));
-    ASN_STRUCT_FREE(asn_DEF_EuiccMemoryResetRequest, asn1req);
-    asn1req = NULL;
-    if (asn1erval.encoded == -1)
-    {
-        goto err;
-    }
-
-    ret = es10x_command_iter(ctx, ctx->g_asn1_der_request_buf, asn1erval.encoded, iter_EuiccMemoryResetResponse, &eresult);
-    if (ret < 0)
-    {
-        goto err;
-    }
+    fret = euicc_derutil_convert_bin2long(tmpnode.value, tmpnode.length);
 
     goto exit;
 
 err:
     fret = -1;
 exit:
-    if (asn1req)
-    {
-        ASN_STRUCT_FREE(asn_DEF_EuiccMemoryResetRequest, asn1req);
-    }
+    free(respbuf);
+    respbuf = NULL;
     return fret;
 }
 
-static int iter_GetEuiccDataResponse(struct apdu_response *response, void *userdata)
+int es10c_enable_profile(struct euicc_ctx *ctx, const char *id, uint8_t refreshFlag)
+{
+    if (refreshFlag)
+    {
+        refreshFlag = 0xFF;
+    }
+    else
+    {
+        refreshFlag = 0x80;
+    }
+    return es10c_enable_disable_delete_profile(ctx, 0xBF31, id, refreshFlag);
+}
+
+int es10c_disable_profile(struct euicc_ctx *ctx, const char *id, uint8_t refreshFlag)
+{
+    if (refreshFlag)
+    {
+        refreshFlag = 0xFF;
+    }
+    else
+    {
+        refreshFlag = 0x80;
+    }
+    return es10c_enable_disable_delete_profile(ctx, 0xBF32, id, refreshFlag);
+}
+
+int es10c_delete_profile(struct euicc_ctx *ctx, const char *id)
+{
+    return es10c_enable_disable_delete_profile(ctx, 0xBF33, id, 0);
+}
+
+int es10c_euicc_memory_reset(struct euicc_ctx *ctx)
 {
     int fret = 0;
-    char **eid = (char **)userdata;
-    asn_dec_rval_t asn1drval;
-    GetEuiccDataResponse_t *asn1resp = NULL;
+    struct euicc_derutil_node n_request = {
+        .tag = 0xBF34, // EuiccMemoryResetRequest
+        .pack = {
+            .child = &(struct euicc_derutil_node){
+                .tag = 0x82, // resetOptions
+                .length = 2,
+                .value = (const uint8_t[]){0x05, 0xE0},
+            },
+        },
+    };
+    uint32_t reqlen;
+    uint8_t *respbuf = NULL;
+    unsigned resplen;
 
-    *eid = NULL;
+    struct euicc_derutil_node tmpnode;
 
-    asn1drval = ber_decode(NULL, &asn_DEF_GetEuiccDataResponse, (void **)&asn1resp, response->data, response->length);
-    if (asn1drval.code != RC_OK)
+    reqlen = sizeof(ctx->apdu._internal.request_buffer.body);
+    if (euicc_derutil_pack(ctx->apdu._internal.request_buffer.body, &reqlen, &n_request))
     {
         goto err;
     }
 
-    *eid = malloc((asn1resp->eidValue.size * 2) + 1);
-    if (*eid == NULL)
+    if (es10x_command(ctx, &respbuf, &resplen, ctx->apdu._internal.request_buffer.body, reqlen) < 0)
     {
         goto err;
     }
 
-    if (euicc_hexutil_bin2hex(*eid, (asn1resp->eidValue.size * 2) + 1, asn1resp->eidValue.buf, asn1resp->eidValue.size))
+    if (euicc_derutil_unpack_find_tag(&tmpnode, n_request.tag, respbuf, resplen) < 0)
     {
         goto err;
     }
+
+    if (euicc_derutil_unpack_find_tag(&tmpnode, 0x80, tmpnode.value, tmpnode.length) < 0)
+    {
+        goto err;
+    }
+
+    fret = euicc_derutil_convert_bin2long(tmpnode.value, tmpnode.length);
 
     goto exit;
 
 err:
     fret = -1;
-    free(*eid);
-    *eid = NULL;
 exit:
-    if (asn1resp)
-    {
-        ASN_STRUCT_FREE(asn_DEF_GetEuiccDataResponse, asn1resp);
-    }
-
+    free(respbuf);
+    respbuf = NULL;
     return fret;
 }
 
-int es10c_get_eid(struct euicc_ctx *ctx, char **eid)
+int es10c_get_eid(struct euicc_ctx *ctx, char **eidValue)
 {
     int fret = 0;
-    int ret;
-    asn_enc_rval_t asn1erval;
-    GetEuiccDataRequest_t *asn1req = NULL;
+    struct euicc_derutil_node n_request = {
+        .tag = 0xBF3E, // GetEuiccDataRequest
+        .pack = {
+            .child = &(struct euicc_derutil_node){
+                .tag = 0x5C, // tagList
+                .length = 1,
+                .value = (const uint8_t[]){0x5A},
+            },
+        },
+    };
+    uint32_t reqlen;
+    uint8_t *respbuf = NULL;
+    unsigned resplen;
 
-    asn1req = malloc(sizeof(GetEuiccDataRequest_t));
-    if (!asn1req)
-    {
-        goto err;
-    }
-    memset(asn1req, 0, sizeof(*asn1req));
+    struct euicc_derutil_node tmpnode;
 
-    ret = OCTET_STRING_fromBuf(&asn1req->tagList, "\x5A", 1);
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    asn1erval = der_encode_to_buffer(&asn_DEF_GetEuiccDataRequest, asn1req, ctx->g_asn1_der_request_buf, sizeof(ctx->g_asn1_der_request_buf));
-    ASN_STRUCT_FREE(asn_DEF_GetEuiccDataRequest, asn1req);
-    asn1req = NULL;
-    if (asn1erval.encoded == -1)
+    reqlen = sizeof(ctx->apdu._internal.request_buffer.body);
+    if (euicc_derutil_pack(ctx->apdu._internal.request_buffer.body, &reqlen, &n_request))
     {
         goto err;
     }
 
-    ret = es10x_command_iter(ctx, ctx->g_asn1_der_request_buf, asn1erval.encoded, iter_GetEuiccDataResponse, eid);
-    if (ret < 0)
+    if (es10x_command(ctx, &respbuf, &resplen, ctx->apdu._internal.request_buffer.body, reqlen) < 0)
     {
         goto err;
     }
+
+    if (euicc_derutil_unpack_find_tag(&tmpnode, n_request.tag, respbuf, resplen))
+    {
+        goto err;
+    }
+
+    if (euicc_derutil_unpack_find_tag(&tmpnode, 0x5A, tmpnode.value, tmpnode.length))
+    {
+        goto err;
+    }
+
+    *eidValue = malloc((tmpnode.length * 2) + 1);
+    if (*eidValue == NULL)
+    {
+        goto err;
+    }
+
+    euicc_hexutil_bin2hex(*eidValue, (tmpnode.length * 2) + 1, tmpnode.value, tmpnode.length);
+
+    goto exit;
+
+err:
+    fret = -1;
+    free(*eidValue);
+    *eidValue = NULL;
+exit:
+    free(respbuf);
+    respbuf = NULL;
+    return fret;
+}
+
+int es10c_set_nickname(struct euicc_ctx *ctx, const char *iccid, const char *profileNickname)
+{
+    int fret = 0;
+    uint8_t asn1iccid[10];
+    struct euicc_derutil_node n_request, n_iccid, n_profileNickname;
+    uint32_t reqlen;
+    uint8_t *respbuf = NULL;
+    unsigned resplen;
+
+    struct euicc_derutil_node tmpnode;
+
+    memset(&n_request, 0, sizeof(n_request));
+    memset(&n_iccid, 0, sizeof(n_iccid));
+    memset(&n_profileNickname, 0, sizeof(n_profileNickname));
+
+    if (euicc_hexutil_gsmbcd2bin(asn1iccid, sizeof(asn1iccid), iccid) < 0)
+    {
+        goto err;
+    }
+
+    n_request.tag = 0xBF29;
+    n_request.pack.child = &n_iccid;
+
+    n_iccid.tag = 0x5A;
+    n_iccid.length = sizeof(asn1iccid);
+    n_iccid.value = asn1iccid;
+    n_iccid.pack.next = &n_profileNickname;
+
+    n_profileNickname.tag = 0x90;
+    n_profileNickname.length = strlen(profileNickname);
+    n_profileNickname.value = (const uint8_t *)profileNickname;
+
+    reqlen = sizeof(ctx->apdu._internal.request_buffer.body);
+    if (euicc_derutil_pack(ctx->apdu._internal.request_buffer.body, &reqlen, &n_request))
+    {
+        goto err;
+    }
+
+    if (es10x_command(ctx, &respbuf, &resplen, ctx->apdu._internal.request_buffer.body, reqlen) < 0)
+    {
+        goto err;
+    }
+
+    if (euicc_derutil_unpack_find_tag(&tmpnode, n_request.tag, respbuf, resplen) < 0)
+    {
+        goto err;
+    }
+
+    if (euicc_derutil_unpack_find_tag(&tmpnode, 0x80, tmpnode.value, tmpnode.length) < 0)
+    {
+        goto err;
+    }
+
+    fret = euicc_derutil_convert_bin2long(tmpnode.value, tmpnode.length);
 
     goto exit;
 
 err:
     fret = -1;
 exit:
-    if (asn1req)
-    {
-        ASN_STRUCT_FREE(asn_DEF_GetEuiccDataRequest, asn1req);
-    }
-
+    free(respbuf);
+    respbuf = NULL;
     return fret;
 }
 
-static int iter_SetNicknameResponse(struct apdu_response *response, void *userdata)
+void es10c_profile_info_list_free_all(struct es10c_profile_info_list *profileInfoList)
 {
-    long *eresult = (long *)userdata;
-    int fret = 0;
-    asn_dec_rval_t asn1drval;
-    SetNicknameResponse_t *asn1resp = NULL;
-
-    asn1drval = ber_decode(NULL, &asn_DEF_SetNicknameResponse, (void **)&asn1resp, response->data, response->length);
-    if (asn1drval.code != RC_OK)
+    while (profileInfoList)
     {
-        goto err;
+        struct es10c_profile_info_list *next = profileInfoList->next;
+        free(profileInfoList->profileNickname);
+        free(profileInfoList->serviceProviderName);
+        free(profileInfoList->profileName);
+        free(profileInfoList->icon);
+        free(profileInfoList);
+        profileInfoList = next;
     }
-
-    asn_INTEGER2long(&asn1resp->setNicknameResult, eresult);
-    goto exit;
-
-err:
-    fret = -1;
-exit:
-    if (asn1resp)
-    {
-        ASN_STRUCT_FREE(asn_DEF_SetNicknameResponse, asn1resp);
-    }
-
-    return fret;
-}
-
-int es10c_set_nickname(struct euicc_ctx *ctx, const char *iccid, const char *nickname)
-{
-    int fret = 0;
-    int ret;
-    asn_enc_rval_t asn1erval;
-    SetNicknameRequest_t *asn1req = NULL;
-    uint8_t asn1iccid[20];
-    unsigned long eresult;
-
-    asn1req = malloc(sizeof(SetNicknameRequest_t));
-    if (!asn1req)
-    {
-        goto err;
-    }
-    memset(asn1req, 0, sizeof(*asn1req));
-
-    ret = euicc_hexutil_gsmbcd2bin(asn1iccid, sizeof(asn1iccid), iccid);
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    ret = OCTET_STRING_fromBuf(&asn1req->iccid, (const char *)asn1iccid, ret);
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    ret = OCTET_STRING_fromBuf(&asn1req->profileNickname, nickname, strlen(nickname));
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    asn1erval = der_encode_to_buffer(&asn_DEF_SetNicknameRequest, asn1req, ctx->g_asn1_der_request_buf, sizeof(ctx->g_asn1_der_request_buf));
-    ASN_STRUCT_FREE(asn_DEF_SetNicknameRequest, asn1req);
-    asn1req = NULL;
-    if (asn1erval.encoded == -1)
-    {
-        goto err;
-    }
-
-    ret = es10x_command_iter(ctx, ctx->g_asn1_der_request_buf, asn1erval.encoded, iter_SetNicknameResponse, &eresult);
-    if (ret < 0)
-    {
-        goto err;
-    }
-
-    fret = eresult;
-    goto exit;
-
-err:
-    fret = -1;
-exit:
-    if (asn1req)
-    {
-        ASN_STRUCT_FREE(asn_DEF_SetNicknameRequest, asn1req);
-    }
-
-    return fret;
-}
-
-void es10c_profile_info_free_all(struct es10c_profile_info *profiles, int count)
-{
-    if (!profiles)
-    {
-        return;
-    }
-    for (int i = 0; i < count; i++)
-    {
-        free(profiles[i].profileState);
-        free(profiles[i].profileClass);
-        free(profiles[i].profileNickname);
-        free(profiles[i].serviceProviderName);
-        free(profiles[i].profileName);
-        free(profiles[i].iconType);
-        free(profiles[i].icon);
-    }
-    free(profiles);
-}
-
-void es10c_profile_info_print(struct es10c_profile_info *p)
-{
-    printf("\ticcid: %s\n", p->iccid);
-    printf("\tisdpAid: %s\n", p->isdpAid);
-    printf("\tprofileState: %s\n", p->profileState);
-    printf("\tprofileNickname: %s\n", p->profileNickname ? p->profileNickname : "(null)");
-    printf("\tserviceProviderName: %s\n", p->serviceProviderName ? p->serviceProviderName : "(null)");
-    printf("\tprofileName: %s\n", p->profileName ? p->profileName : "(null)");
-    printf("\tprofileClass: %s\n", p->profileClass);
 }

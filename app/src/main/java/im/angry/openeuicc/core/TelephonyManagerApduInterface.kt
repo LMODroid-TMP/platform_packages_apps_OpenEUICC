@@ -3,16 +3,18 @@ package im.angry.openeuicc.core
 import android.telephony.IccOpenLogicalChannelResponse
 import android.telephony.TelephonyManager
 import im.angry.openeuicc.util.*
-import net.typeblog.lpac_jni.LocalProfileAssistant
 import net.typeblog.lpac_jni.ApduInterface
-import net.typeblog.lpac_jni.impl.HttpInterfaceImpl
-import net.typeblog.lpac_jni.impl.LocalProfileAssistantImpl
 
 class TelephonyManagerApduInterface(
     private val port: UiccPortInfoCompat,
     private val tm: TelephonyManager
 ): ApduInterface {
     private var lastChannel: Int = -1
+
+    override val valid: Boolean
+        // TelephonyManager channels will never become truly "invalid",
+        // just that transactions might return errors or nonsense
+        get() = lastChannel != -1
 
     override fun connect() {
         // Do nothing
@@ -54,14 +56,4 @@ class TelephonyManagerApduInterface(
             cla, instruction, p1, p2, p3, p4)?.decodeHex() ?: byteArrayOf()
     }
 
-}
-
-class TelephonyManagerChannel(
-    port: UiccPortInfoCompat,
-    private val tm: TelephonyManager
-) : EuiccChannel(port) {
-    override val lpa: LocalProfileAssistant = LocalProfileAssistantImpl(
-        TelephonyManagerApduInterface(port, tm),
-        HttpInterfaceImpl()
-    )
 }

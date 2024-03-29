@@ -19,16 +19,15 @@ import androidx.recyclerview.widget.DividerItemDecoration
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
-import im.angry.openeuicc.OpenEuiccApplication
 import im.angry.openeuicc.common.R
 import im.angry.openeuicc.core.EuiccChannel
-import im.angry.openeuicc.util.displayName
+import im.angry.openeuicc.util.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import net.typeblog.lpac_jni.LocalProfileNotification
 
-class NotificationsActivity: AppCompatActivity() {
+class NotificationsActivity: AppCompatActivity(), OpenEuiccContextMarker {
     private lateinit var swipeRefresh: SwipeRefreshLayout
     private lateinit var notificationList: RecyclerView
     private val notificationAdapter = NotificationAdapter()
@@ -38,14 +37,14 @@ class NotificationsActivity: AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_notifications)
-        setSupportActionBar(findViewById(R.id.toolbar))
+        setSupportActionBar(requireViewById(R.id.toolbar))
         supportActionBar!!.setDisplayHomeAsUpEnabled(true)
 
-        euiccChannel = (application as OpenEuiccApplication).euiccChannelManager
+        euiccChannel = euiccChannelManager
             .findEuiccChannelBySlotBlocking(intent.getIntExtra("logicalSlotId", 0))!!
 
-        swipeRefresh = findViewById(R.id.swipe_refresh)
-        notificationList = findViewById(R.id.recycler_view)
+        swipeRefresh = requireViewById(R.id.swipe_refresh)
+        notificationList = requireViewById(R.id.recycler_view)
 
         notificationList.layoutManager =
             LinearLayoutManager(this, LinearLayoutManager.VERTICAL, false)
@@ -119,8 +118,8 @@ class NotificationsActivity: AppCompatActivity() {
     @SuppressLint("ClickableViewAccessibility")
     inner class NotificationViewHolder(private val root: View):
         RecyclerView.ViewHolder(root), View.OnCreateContextMenuListener, OnMenuItemClickListener {
-        private val address: TextView = root.findViewById(R.id.notification_address)
-        private val profileName: TextView = root.findViewById(R.id.notification_profile_name)
+        private val address: TextView = root.requireViewById(R.id.notification_address)
+        private val profileName: TextView = root.requireViewById(R.id.notification_profile_name)
 
         private lateinit var notification: LocalProfileNotificationWrapper
 

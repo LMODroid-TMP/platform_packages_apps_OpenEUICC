@@ -5,9 +5,6 @@ import android.se.omapi.SEService
 import android.se.omapi.Session
 import im.angry.openeuicc.util.*
 import net.typeblog.lpac_jni.ApduInterface
-import net.typeblog.lpac_jni.LocalProfileAssistant
-import net.typeblog.lpac_jni.impl.HttpInterfaceImpl
-import net.typeblog.lpac_jni.impl.LocalProfileAssistantImpl
 
 class OmapiApduInterface(
     private val service: SEService,
@@ -15,6 +12,9 @@ class OmapiApduInterface(
 ): ApduInterface {
     private lateinit var session: Session
     private lateinit var lastChannel: Channel
+
+    override val valid: Boolean
+        get() = service.isConnected && (this::session.isInitialized && !session.isClosed)
 
     override fun connect() {
         session = service.getUiccReaderCompat(port.logicalSlotIndex + 1).openSession()
@@ -47,13 +47,4 @@ class OmapiApduInterface(
         return lastChannel.transmit(tx)
     }
 
-}
-
-class OmapiChannel(
-    service: SEService,
-    port: UiccPortInfoCompat,
-) : EuiccChannel(port) {
-    override val lpa: LocalProfileAssistant = LocalProfileAssistantImpl(
-        OmapiApduInterface(service, port),
-        HttpInterfaceImpl())
 }

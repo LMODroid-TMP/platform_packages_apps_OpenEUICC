@@ -2,20 +2,19 @@ package im.angry.openeuicc.ui
 
 import android.app.Dialog
 import android.os.Bundle
+import android.text.Editable
 import android.util.Log
+import android.widget.EditText
 import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.DialogFragment
 import androidx.lifecycle.lifecycleScope
 import im.angry.openeuicc.common.R
-import im.angry.openeuicc.util.preferenceRepository
-import kotlinx.coroutines.Dispatchers
+import im.angry.openeuicc.util.*
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import net.typeblog.lpac_jni.LocalProfileNotification
 import java.lang.Exception
 
-class ProfileDeleteFragment : DialogFragment(), EuiccFragmentMarker {
+class ProfileDeleteFragment : DialogFragment(), EuiccChannelFragmentMarker {
     companion object {
         const val TAG = "ProfileDeleteFragment"
 
@@ -29,11 +28,21 @@ class ProfileDeleteFragment : DialogFragment(), EuiccFragmentMarker {
         }
     }
 
+    private val editText by lazy {
+        EditText(requireContext()).apply {
+            hint = Editable.Factory.getInstance().newEditable(
+                getString(R.string.profile_delete_confirm_input, requireArguments().getString("name")!!)
+            )
+        }
+    }
+    private val inputMatchesName: Boolean
+        get() = editText.text.toString() == requireArguments().getString("name")!!
     private var deleting = false
 
     override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
         return AlertDialog.Builder(requireContext(), R.style.AlertDialogTheme).apply {
             setMessage(getString(R.string.profile_delete_confirm, requireArguments().getString("name")))
+            setView(editText)
             setPositiveButton(android.R.string.ok, null) // Set listener to null to prevent auto closing
             setNegativeButton(android.R.string.cancel, null)
         }.create()
@@ -43,7 +52,7 @@ class ProfileDeleteFragment : DialogFragment(), EuiccFragmentMarker {
         super.onResume()
         val alertDialog = dialog!! as AlertDialog
         alertDialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-            if (!deleting) delete()
+            if (!deleting && inputMatchesName) delete()
         }
         alertDialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
             if (!deleting) dismiss()
@@ -73,7 +82,7 @@ class ProfileDeleteFragment : DialogFragment(), EuiccFragmentMarker {
         }
     }
 
-    private suspend fun doDelete() = channel.lpa.beginOperation {
+    private suspend fun doDelete() = beginTrackedOperation {
         channel.lpa.deleteProfile(requireArguments().getString("iccid")!!)
         preferenceRepository.notificationDeleteFlow.first()
     }

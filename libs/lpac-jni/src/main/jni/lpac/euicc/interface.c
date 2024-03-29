@@ -28,20 +28,20 @@ static int le(struct apdu_request *apdu, uint8_t cla, uint8_t ins, uint8_t p1, u
 
 int euicc_apdu_lc(struct euicc_ctx *ctx, struct apdu_request **apdu, uint8_t cla, uint8_t ins, uint8_t p1, uint8_t p2, uint8_t datalen)
 {
-    *apdu = (struct apdu_request *)ctx->g_apdu_request_buf;
+    *apdu = (struct apdu_request *)&ctx->apdu._internal.request_buffer;
     return lc(*apdu, cla, ins, p1, p2, datalen);
 }
 
 int euicc_apdu_le(struct euicc_ctx *ctx, struct apdu_request **apdu, uint8_t cla, uint8_t ins, uint8_t p1, uint8_t p2, uint8_t requestlen)
 {
-    *apdu = (struct apdu_request *)ctx->g_apdu_request_buf;
+    *apdu = (struct apdu_request *)&ctx->apdu._internal.request_buffer;
     return le(*apdu, cla, ins, p1, p2, requestlen);
 }
 
 static void euicc_apdu_request_print(const struct apdu_request *req, uint32_t request_len)
 {
     fprintf(stderr, "[DEBUG] [APDU] [TX] CLA: %02X, INS: %02X, P1: %02X, P2: %02X, Lc: %02X, Data: ", req->cla, req->ins, req->p1, req->p2, req->length);
-    for (int i = 0; i < (request_len - sizeof(struct apdu_request)); i++)
+    for (uint32_t i = 0; i < (request_len - sizeof(struct apdu_request)); i++)
         fprintf(stderr, "%02X ", (req->data[i] & 0xFF));
     fprintf(stderr, "\n");
 }
@@ -49,14 +49,14 @@ static void euicc_apdu_request_print(const struct apdu_request *req, uint32_t re
 static void euicc_apdu_response_print(const struct apdu_response *resp)
 {
     fprintf(stderr, "[DEBUG] [APDU] [RX] SW1: %02X, SW2: %02X, Data: ", resp->sw1, resp->sw2);
-    for (int i = 0; i < resp->length; i++)
+    for (uint32_t i = 0; i < resp->length; i++)
         fprintf(stderr, "%02X ", (resp->data[i] & 0xFF));
     fprintf(stderr, "\n");
 }
 
 int euicc_apdu_transmit(struct euicc_ctx *ctx, struct apdu_response *response, const struct apdu_request *request, uint32_t request_len)
 {
-    struct euicc_apdu_interface *in = ctx->interface.apdu;
+    const struct euicc_apdu_interface *in = ctx->apdu.interface;
 
     memset(response, 0x00, sizeof(*response));
 
