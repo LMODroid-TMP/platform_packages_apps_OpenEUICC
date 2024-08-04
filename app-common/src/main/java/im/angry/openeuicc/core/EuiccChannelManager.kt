@@ -1,12 +1,36 @@
 package im.angry.openeuicc.core
 
+import android.hardware.usb.UsbDevice
+
+/**
+ * EuiccChannelManager holds references to, and manages the lifecycles of, individual
+ * APDU channels to SIM cards. The find* methods will create channels when needed, and
+ * all opened channels will be held in an internal cache until invalidate() is called
+ * or when this instance is destroyed.
+ *
+ * To precisely control the lifecycle of this object itself (and thus its cached channels),
+ * all other compoents must access EuiccChannelManager objects through EuiccChannelManagerService.
+ * Holding references independent of EuiccChannelManagerService is unsupported.
+ */
 interface EuiccChannelManager {
-    val knownChannels: List<EuiccChannel>
+    companion object {
+        const val USB_CHANNEL_ID = 99
+    }
 
     /**
-     * Scan all possible sources for EuiccChannels and have them cached for future use
+     * Scan all possible _device internal_ sources for EuiccChannels, return them and have all
+     * scanned channels cached; these channels will remain open for the entire lifetime of
+     * this EuiccChannelManager object, unless disconnected externally or invalidate()'d
      */
-    suspend fun enumerateEuiccChannels()
+    suspend fun enumerateEuiccChannels(): List<EuiccChannel>
+
+    /**
+     * Scan all possible USB devices for CCID readers that may contain eUICC cards.
+     * If found, try to open it for access, and add it to the internal EuiccChannel cache
+     * as a "port" with id 99. When user interaction is required to obtain permission
+     * to interact with the device, the second return value (EuiccChannel) will be null.
+     */
+    suspend fun enumerateUsbEuiccChannel(): Pair<UsbDevice?, EuiccChannel?>
 
     /**
      * Wait for a slot + port to reconnect (i.e. become valid again)
@@ -41,7 +65,7 @@ interface EuiccChannelManager {
     fun findEuiccChannelByPortBlocking(physicalSlotId: Int, portId: Int): EuiccChannel?
 
     /**
-     * Invalidate all EuiccChannels previously known by this Manager
+     * Invalidate all EuiccChannels previously cached by this Manager
      */
     fun invalidate()
 

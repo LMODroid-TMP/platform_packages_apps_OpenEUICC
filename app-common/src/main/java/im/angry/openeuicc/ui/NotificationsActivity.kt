@@ -12,7 +12,6 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
-import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.forEach
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.DividerItemDecoration
@@ -21,13 +20,14 @@ import androidx.recyclerview.widget.RecyclerView
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import im.angry.openeuicc.common.R
 import im.angry.openeuicc.core.EuiccChannel
+import im.angry.openeuicc.core.EuiccChannelManager
 import im.angry.openeuicc.util.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import net.typeblog.lpac_jni.LocalProfileNotification
 
-class NotificationsActivity: AppCompatActivity(), OpenEuiccContextMarker {
+class NotificationsActivity: BaseEuiccAccessActivity(), OpenEuiccContextMarker {
     private lateinit var swipeRefresh: SwipeRefreshLayout
     private lateinit var notificationList: RecyclerView
     private val notificationAdapter = NotificationAdapter()
@@ -39,7 +39,9 @@ class NotificationsActivity: AppCompatActivity(), OpenEuiccContextMarker {
         setContentView(R.layout.activity_notifications)
         setSupportActionBar(requireViewById(R.id.toolbar))
         supportActionBar!!.setDisplayHomeAsUpEnabled(true)
+    }
 
+    override fun onInit() {
         euiccChannel = euiccChannelManager
             .findEuiccChannelBySlotBlocking(intent.getIntExtra("logicalSlotId", 0))!!
 
@@ -51,6 +53,16 @@ class NotificationsActivity: AppCompatActivity(), OpenEuiccContextMarker {
         notificationList.addItemDecoration(DividerItemDecoration(this, LinearLayoutManager.VERTICAL))
         notificationList.adapter = notificationAdapter
         registerForContextMenu(notificationList)
+
+        // This is slightly different from the MainActivity logic
+        // due to the length (we don't want to display the full USB product name)
+        val channelTitle = if (euiccChannel.logicalSlotId == EuiccChannelManager.USB_CHANNEL_ID) {
+            getString(R.string.usb)
+        } else {
+            getString(R.string.channel_name_format, euiccChannel.logicalSlotId)
+        }
+
+        title = getString(R.string.profile_notifications_detailed_format, channelTitle)
 
         swipeRefresh.setOnRefreshListener {
             refresh()
@@ -179,8 +191,9 @@ class NotificationsActivity: AppCompatActivity(), OpenEuiccContextMarker {
                         withContext(Dispatchers.IO) {
                             euiccChannel.lpa.handleNotification(notification.inner.seqNumber)
                         }
+
+                        refresh()
                     }
-                    refresh()
                     true
                 }
                 R.id.notification_delete -> {
@@ -188,8 +201,9 @@ class NotificationsActivity: AppCompatActivity(), OpenEuiccContextMarker {
                         withContext(Dispatchers.IO) {
                             euiccChannel.lpa.deleteNotification(notification.inner.seqNumber)
                         }
+
+                        refresh()
                     }
-                    refresh()
                     true
                 }
                 else -> false

@@ -1,5 +1,4 @@
-{Open,Easy}EUICC
----
+<img src="https://gitea.angry.im/PeterCxy/OpenEUICC/media/branch/master/art/OpenEUICCBG.svg" width="512" height="300">
 
 A fully free and open-source Local Profile Assistant implementation for Android devices.
 
@@ -9,9 +8,11 @@ There are two variants of this project:
   - Due to its privilege requirement, OpenEUICC must be placed inside `/system/priv-app` and be signed with the platform certificate.
   - The preferred way to including OpenEUICC in a system image is to [build it along with AOSP](#building-aosp).
 - EasyEUICC: Unprivileged version that can run as a user app.
-  - Due to obvious security requirements, EasyEUICC is only able to access eSIM chips whose [ARF/ARA](https://source.android.com/docs/core/connect/uicc#arf) contains the hash of EasyEUICC's signing certificate.
+  - This version supports two modes of operation:
+    1. Inserted, removable eSIMs: Due to obvious security requirements, EasyEUICC is only able to access eSIM chips whose [ARF/ARA](https://source.android.com/docs/core/connect/uicc#arf) contains the hash of EasyEUICC's signing certificate.
+    2. USB CCID Card Readers: Only `T=0` readers that use the standard [USB CCID protocol](https://en.wikipedia.org/wiki/CCID_(protocol)) are supported. In this mode, EasyEUICC can access any eSIM chip loaded in the card reader regardless of their ARF/ARA, as long as they implement the [SGP.22 standard](https://www.gsma.com/solutions-and-impact/technologies/esim/wp-content/uploads/2021/07/SGP.22-v2.3.pdf).
   - Prebuilt release-mode EasyEUICC apks can be downloaded [here](https://gitea.angry.im/PeterCxy/OpenEUICC/releases)
-  - For removable eSIM chip vendors: to have your chip supported by official builds of EasyEUICC, include the ARA-M hash `2A2FA878BC7C3354C2CF82935A5945A3EDAE4AFA`
+  - For removable eSIM chip vendors: to have your chip supported by official builds of EasyEUICC when inserted, include the ARA-M hash `2A2FA878BC7C3354C2CF82935A5945A3EDAE4AFA`
 
 Building (Gradle)
 ===
@@ -78,14 +79,14 @@ FAQs
 Copyright
 ===
 
-Everything except `libs/lpac-jni`:
+Everything except `libs/lpac-jni` and `art/`:
 
 ```
 Copyright 2022-2024 OpenEUICC contributors
 
 This program is free software; you can redistribute it and/or
 modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation, version 2.
+as published by the Free Software Foundation, version 3.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -115,3 +116,5 @@ You should have received a copy of the GNU Lesser General Public
 License along with this library; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 ```
+
+`art/`: Courtesy of [Aikoyori](https://github.com/Aikoyori), CC NC-SA 4.0.
