@@ -12,3 +12,14 @@ _deps
 build
 .vscode*
 .DS_Store
+
+# version
+/src/version.h
+
+# for package files
+lpac_*.deb
+lpac-*.zip
+
+# for clion ignores
+.idea
+cmake-build-*
