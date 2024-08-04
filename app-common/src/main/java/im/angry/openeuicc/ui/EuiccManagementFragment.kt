@@ -297,7 +297,7 @@ open class EuiccManagementFragment : Fragment(), EuiccProfilesChangedListener,
 
             iccid.setOnLongClickListener {
                 requireContext().getSystemService(ClipboardManager::class.java)
-                    .setPrimaryClip(ClipData.newPlainText("iccid", iccid.text))
+                    ?.setPrimaryClip(ClipData.newPlainText("iccid", iccid.text))
                 Toast.makeText(requireContext(), R.string.toast_iccid_copied, Toast.LENGTH_SHORT)
                     .show()
                 true
